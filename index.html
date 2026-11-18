@@ -608,7 +608,7 @@
           </div>
         </div>
 
-        <!-- Tab D: 積分管理（需管理密碼 310126） -->
+        <!-- Tab D: 積分管理（需管理安全碼 PIN） -->
         <div id="admin-tab-points" class="hidden space-y-5">
           <!-- 全部選手積分總覽表 -->
           <div class="bg-white border border-amber-200 rounded-xl p-4 space-y-3 shadow-sm">
@@ -1000,7 +1000,7 @@
     </div>
   </div>
 
-  <!-- 🔒 榮譽點數與兌獎管理後台 (需安全碼 310126) Modal -->
+  <!-- 🔒 榮譽點數與兌獎管理後台 (需管理安全碼) Modal -->
   <div id="points-admin-modal" class="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 hidden flex items-center justify-center p-4">
     <div class="bg-white rounded-2xl shadow-2xl max-w-xl w-full max-h-[90vh] flex flex-col overflow-hidden border border-slate-200">
       <div class="bg-amber-700 text-white p-4 px-6 flex items-center justify-between">
@@ -1137,6 +1137,14 @@
     </div>
   </div>
 
+  <!-- 雲端處理中遮罩 -->
+  <div id="busy-overlay" class="hidden fixed inset-0 bg-slate-900/40 z-[70] flex items-center justify-center p-4">
+    <div class="bg-white rounded-xl shadow-xl px-6 py-4 text-sm font-bold text-emerald-900 flex items-center space-x-2.5">
+      <i class="fa-solid fa-spinner fa-spin text-emerald-600"></i>
+      <span id="busy-overlay-text">處理中，請稍候...</span>
+    </div>
+  </div>
+
   <!-- 列印／匯出錯題 PDF 專用區塊 -->
   <div id="print-only-sheet" class="hidden"></div>
 
@@ -1208,17 +1216,133 @@
     const LS_POINTS_PROFILE_PREFIX = "ekc_points_profile_v1_";
     const LS_POINTS_HISTORY_PREFIX = "ekc_points_history_v1_";
     const LS_ADMIN_PIN_KEY = "ekc_sys_admin_pin_v1";
-    const POINTS_ADMIN_PIN = "310126";
+    const LS_SYNC_META_PREFIX = "ekc_sync_meta_v1_";
 
-    function getAdminPin() {
-      const admins = getUsers().filter(u => u.role === "admin" && u.status !== "disabled" && u.securityPin);
-      if (admins.length && admins[0].securityPin) return String(admins[0].securityPin).trim();
-      const localPin = localStorage.getItem(LS_ADMIN_PIN_KEY);
-      if (localPin && localPin.trim()) return localPin.trim();
-      return POINTS_ADMIN_PIN;
+    // ---- 密碼雜湊（SHA-256，本機與雲端皆只保存雜湊值，不保存明碼） ----
+    function sha256Hex(input) {
+      const msg = unescape(encodeURIComponent(String(input)));
+      const K = [0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2];
+      const H = [0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19];
+      const l = msg.length;
+      const nWords = (((l + 8) >> 6) + 1) * 16;
+      const W = new Array(nWords).fill(0);
+      for (let i = 0; i < l; i++) W[i >> 2] |= msg.charCodeAt(i) << (24 - (i % 4) * 8);
+      W[l >> 2] |= 0x80 << (24 - (l % 4) * 8);
+      W[nWords - 1] = (l * 8) >>> 0;
+      W[nWords - 2] = Math.floor((l * 8) / 0x100000000);
+      const rotr = (x, n) => (x >>> n) | (x << (32 - n));
+      const w = new Array(64);
+      for (let off = 0; off < nWords; off += 16) {
+        for (let t = 0; t < 64; t++) {
+          if (t < 16) {
+            w[t] = W[off + t] | 0;
+          } else {
+            const s0 = rotr(w[t - 15], 7) ^ rotr(w[t - 15], 18) ^ (w[t - 15] >>> 3);
+            const s1 = rotr(w[t - 2], 17) ^ rotr(w[t - 2], 19) ^ (w[t - 2] >>> 10);
+            w[t] = (w[t - 16] + s0 + w[t - 7] + s1) | 0;
+          }
+        }
+        let [a, b, c, d, e, f, g, h] = H;
+        for (let t = 0; t < 64; t++) {
+          const S1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
+          const ch = (e & f) ^ (~e & g);
+          const t1 = (h + S1 + ch + K[t] + w[t]) | 0;
+          const S0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
+          const maj = (a & b) ^ (a & c) ^ (b & c);
+          const t2 = (S0 + maj) | 0;
+          h = g; g = f; f = e; e = (d + t1) | 0; d = c; c = b; b = a; a = (t1 + t2) | 0;
+        }
+        H[0] = (H[0] + a) | 0; H[1] = (H[1] + b) | 0; H[2] = (H[2] + c) | 0; H[3] = (H[3] + d) | 0;
+        H[4] = (H[4] + e) | 0; H[5] = (H[5] + f) | 0; H[6] = (H[6] + g) | 0; H[7] = (H[7] + h) | 0;
+      }
+      return H.map(x => (x >>> 0).toString(16).padStart(8, "0")).join("");
+    }
+    // 與 Apps Script 相同的規則：雲端「帳號密碼管理」分頁存明碼，驗證時雙方都換算成雜湊比對
+    function hashPw(username, pwd) {
+      return sha256Hex(`ekc-pw:${String(username || "").trim()}:${String(pwd ?? "").trim()}`);
+    }
+    function hashPin(pin) {
+      return sha256Hex(`ekc-pin:${String(pin || "").trim()}`);
+    }
+
+    // ---- 同步版本資訊（每位選手一份，用於判斷雲端是否被其他裝置／管理者改過） ----
+    function getSyncMeta(recordKey) {
+      try { return JSON.parse(localStorage.getItem(LS_SYNC_META_PREFIX + recordKey) || "{}") || {}; } catch (e) { return {}; }
+    }
+    function setSyncMeta(recordKey, meta) {
+      localStorage.setItem(LS_SYNC_META_PREFIX + recordKey, JSON.stringify(meta));
+    }
+    function isOwnStudentRecord(uname) {
+      return !!(currentUser && currentUser.role === "user" && (!uname || uname === currentUser.username));
+    }
+    function markOwnDirty() {
+      if (!currentUser || currentUser.role !== "user") return;
+      const key = getUserRecordKey(currentUser.username, currentUser.name);
+      const meta = getSyncMeta(key);
+      meta.dirty = true;
+      meta.seq = (Number(meta.seq) || 0) + 1;
+      setSyncMeta(key, meta);
+    }
+    function migrateRecordKeys(oldKey, newKey) {
+      if (!oldKey || !newKey || oldKey === newKey) return;
+      [LS_PROGRESS_PREFIX, LS_POINTS_PROFILE_PREFIX, LS_POINTS_HISTORY_PREFIX, LS_CLOUD_LAST_SYNC_PREFIX, LS_SYNC_META_PREFIX].forEach(prefix => {
+        const v = localStorage.getItem(prefix + oldKey);
+        if (v !== null) {
+          if (localStorage.getItem(prefix + newKey) === null) localStorage.setItem(prefix + newKey, v);
+          localStorage.removeItem(prefix + oldKey);
+        }
+      });
+    }
+
+    // ---- 兌獎／異動紀錄工具 ----
+    function newHistoryId() {
+      return "h" + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+    }
+    function historyKey(h) {
+      if (!h) return "";
+      return h.id ? String(h.id) : `${h.time}|${h.reason}|${h.amount}`;
+    }
+    function mergeHistoryLists(serverList, clientList, deletedKeys) {
+      const deleted = new Set(deletedKeys || []);
+      const seen = new Set();
+      const out = [];
+      (serverList || []).concat(clientList || []).forEach(h => {
+        const k = historyKey(h);
+        if (!k || deleted.has(k) || seen.has(k)) return;
+        seen.add(k);
+        out.push(h);
+      });
+      return out.sort((a, b) => (Number(b.ts) || 0) - (Number(a.ts) || 0));
+    }
+    function mergeGroupProgress(a, b) {
+      a = a || {}; b = b || {};
+      const meta = {};
+      [a.wrongMeta || {}, b.wrongMeta || {}].forEach(m => {
+        Object.keys(m).forEach(k => {
+          if (!meta[k] || (Number(m[k].count) || 0) > (Number(meta[k].count) || 0)) meta[k] = m[k];
+        });
+      });
+      return {
+        practiced: Array.from(new Set([...(a.practiced || []), ...(b.practiced || [])])),
+        wrong: Array.from(new Set([...(a.wrong || []), ...(b.wrong || [])])),
+        wrongMeta: meta,
+        totalAnswered: Math.max(Number(a.totalAnswered) || 0, Number(b.totalAnswered) || 0),
+        totalCorrect: Math.max(Number(a.totalCorrect) || 0, Number(b.totalCorrect) || 0),
+        suddenBest: Math.max(Number(a.suddenBest) || 0, Number(b.suddenBest) || 0)
+      };
+    }
+    function mergeProgressObjects(a, b) {
+      const out = {};
+      new Set([...Object.keys(a || {}), ...Object.keys(b || {})]).forEach(g => {
+        out[g] = mergeGroupProgress((a || {})[g], (b || {})[g]);
+      });
+      return out;
     }
 
     let currentUser = null;
+    let sessionAuth = null;   // 本次登入的雲端驗證資訊（僅存在記憶體）
+    let pinAuth = null;       // 學生裝置上以安全碼解鎖的管理驗證
+    let cloudHasAdmin = null; // 雲端是否已建立管理者（null = 尚未確認）
     let activeGroup = "國小";
     let soundEnabled = true;
     let randomCount = 10;
@@ -1243,31 +1367,42 @@
 
     function initDefaultUsers() {
       let users = JSON.parse(localStorage.getItem(LS_USERS_KEY) || "null");
-      if (!users || !Array.isArray(users) || users.length === 0) {
-        // 若曾使用舊版 v2，遷移一般使用者名單並重設預設管理者帳密為 admin / 1234
+      if (!users || !Array.isArray(users)) {
+        // 若曾使用舊版 v2，僅遷移一般使用者名單（不再自動建立任何預設帳號）
         const oldUsers = JSON.parse(localStorage.getItem("ekc_sys_users_v2") || "[]");
-        const migrated = Array.isArray(oldUsers)
-          ? oldUsers.filter(u => u && u.username && u.username !== "admin")
-          : [];
-        users = [
-          { username: "admin", password: "1234", name: "系統管理者", role: "admin", defaultGroup: "", status: "active", createdAt: nowStr() },
-          ...(migrated.length > 0 ? migrated : [
-            { username: "student01", password: "1234", name: "王小明", role: "user", defaultGroup: "國小", status: "active", createdAt: nowStr() },
-            { username: "student02", password: "1234", name: "林小華", role: "user", defaultGroup: "國中", status: "active", createdAt: nowStr() }
-          ])
-        ];
+        users = Array.isArray(oldUsers) ? oldUsers.filter(u => u && u.username && u.username !== "admin" && u.role !== "admin") : [];
         localStorage.setItem(LS_USERS_KEY, JSON.stringify(users));
       }
-      // 確保既有一般使用者皆有預設密碼（未設定者補為 1234）
+      // 本機只保留密碼雜湊（供離線登入）；帳號密碼以雲端「帳號密碼管理」分頁為準
       let patched = false;
       users.forEach(u => {
-        if (u && u.role === "user" && !u.password) {
-          u.password = "1234";
+        if (!u) return;
+        if (u.password !== undefined) {
+          if (u.password) u.pwHash = hashPw(u.username, u.password);
+          delete u.password;
+          patched = true;
+        }
+        if (u.securityPin !== undefined) {
+          if (u.role === "admin" && u.securityPin) u.pinHash = hashPin(u.securityPin);
+          delete u.securityPin;
+          patched = true;
+        }
+        if (u.weakPw !== undefined || u.weakPin !== undefined) {
+          delete u.weakPw;
+          delete u.weakPin;
           patched = true;
         }
       });
+      if (localStorage.getItem(LS_ADMIN_PIN_KEY) !== null) {
+        localStorage.removeItem(LS_ADMIN_PIN_KEY);
+        patched = true;
+      }
       if (patched) localStorage.setItem(LS_USERS_KEY, JSON.stringify(users));
       return users;
+    }
+
+    function getLocalAdmins() {
+      return getUsers().filter(u => u.role === "admin" && u.status !== "disabled" && u.pwHash);
     }
 
     function getUsers() {
@@ -1335,6 +1470,7 @@
       }
       const key = getUserRecordKey(currentUser.username, currentUser.name);
       localStorage.setItem(LS_PROGRESS_PREFIX + key, JSON.stringify(prog));
+      markOwnDirty();
     }
 
     function getGroupProgress(grp) {
@@ -1370,6 +1506,7 @@
       if (!u) return;
       const key = getUserRecordKey(u);
       localStorage.setItem(LS_POINTS_PROFILE_PREFIX + key, JSON.stringify(profile));
+      if (isOwnStudentRecord(u)) markOwnDirty();
     }
 
     function getPointsHistory(uname = null) {
@@ -1387,6 +1524,7 @@
       if (!u) return;
       const key = getUserRecordKey(u);
       localStorage.setItem(LS_POINTS_HISTORY_PREFIX + key, JSON.stringify(history));
+      if (isOwnStudentRecord(u)) markOwnDirty();
     }
 
     function updatePointsDisplay() {
@@ -1472,21 +1610,54 @@
       }
     }
 
-    function handleUserDropdownLogin(e) {
+    function showBusy(msg) {
+      const el = document.getElementById("busy-overlay");
+      if (!el) return;
+      document.getElementById("busy-overlay-text").textContent = msg || "處理中，請稍候...";
+      el.classList.remove("hidden");
+    }
+    function hideBusy() {
+      const el = document.getElementById("busy-overlay");
+      if (el) el.classList.add("hidden");
+    }
+
+    function upsertLocalUser(rec) {
+      const users = getUsers();
+      const idx = users.findIndex(u => u.username === rec.username);
+      if (idx === -1) users.push(rec);
+      else users[idx] = Object.assign({}, users[idx], rec);
+      saveUsers(users);
+      return users.find(u => u.username === rec.username);
+    }
+
+    async function handleUserDropdownLogin(e) {
       e.preventDefault();
       const uname = document.getElementById("login-user-select").value;
       const pwd = document.getElementById("login-user-password").value;
       const errEl = document.getElementById("user-login-error");
+      const showErr = msg => { errEl.textContent = msg; errEl.classList.remove("hidden"); };
       const found = getUsers().find(u => u.username === uname && u.role === "user" && u.status !== "disabled");
       if (!found) return;
-      if ((found.password || "") !== pwd) {
-        errEl.textContent = "使用者密碼錯誤，請重新輸入或洽管理者確認。";
-        errEl.classList.remove("hidden");
-        return;
+      const pwHash = hashPw(uname, pwd);
+      const btn = document.getElementById("btn-user-login");
+      btn.disabled = true;
+      const res = await cloudPost({ action: "login", role: "user", auth: { username: uname, pwHash } });
+      btn.disabled = false;
+      let userRec = null;
+      if (res.ok && res.user) {
+        userRec = upsertLocalUser(Object.assign({}, res.user, { pwHash }));
+      } else if (res.netError || res.no_users) {
+        // 無法連線雲端（或雲端尚未建立名單）時，改以本機保存的密碼雜湊驗證
+        if (!found.pwHash) return showErr(res.netError ? "此裝置尚未保存該帳號的登入資料，請連上網路後再登入。" : "此帳號尚未設定密碼，請洽管理者。");
+        if (found.pwHash !== pwHash) return showErr("使用者密碼錯誤，請重新輸入或洽管理者確認。");
+        userRec = found;
+      } else {
+        return showErr("使用者密碼錯誤，請重新輸入或洽管理者確認。");
       }
       errEl.classList.add("hidden");
       resetAdminPwdLookup(true);
-      completeLogin(found);
+      sessionAuth = { username: uname, pwHash };
+      completeLogin(userRec);
     }
 
     function handleGuestLogin(e) {
@@ -1496,26 +1667,42 @@
       completeLogin({ username: "guest", name: "遊客", role: "guest", defaultGroup: "國小", status: "active" });
     }
 
-    function handleAdminLogin(e) {
+    async function handleAdminLogin(e) {
       e.preventDefault();
       const uname = document.getElementById("login-username").value.trim();
       const pwd = document.getElementById("login-password").value;
       const errEl = document.getElementById("login-error");
-      const found = getUsers().find(u => u.username === uname && u.password === pwd && u.role === "admin");
+      const showErr = msg => { errEl.textContent = msg; errEl.classList.remove("hidden"); };
+      const pwHash = hashPw(uname, pwd);
+      const auth = { username: uname, pwHash };
+      showBusy("正在驗證管理者身分...");
+      const res = await cloudPost({ action: "login", role: "admin", auth });
+      hideBusy();
 
-      if (!found) {
-        errEl.textContent = "管理者帳號或密碼錯誤。";
-        errEl.classList.remove("hidden");
-        return;
-      }
-      if (found.status === "disabled") {
-        errEl.textContent = "此管理者帳號已被停用。";
-        errEl.classList.remove("hidden");
-        return;
+      let adminRec = null;
+      if (res.ok && res.user) {
+        cloudHasAdmin = true;
+        adminRec = upsertLocalUser(Object.assign({}, res.user, { pwHash, pinHash: res.user.pinHash }));
+      } else if (res.netError) {
+        // 無法連線雲端時，改用此裝置先前登入成功時保存的雜湊驗證
+        const localAdmins = getLocalAdmins();
+        if (localAdmins.length === 0) return showErr("無法連線雲端，且此裝置沒有管理者資料。請連上網路後再試。");
+        adminRec = localAdmins.find(u => u.username === uname && u.pwHash === pwHash);
+        if (!adminRec) return showErr("管理者帳號或密碼錯誤。");
+      } else {
+        return showErr("管理者帳號或密碼錯誤。");
       }
       errEl.classList.add("hidden");
       resetAdminPwdLookup(true);
-      completeLogin(found);
+      sessionAuth = auth;
+      completeAdminLogin(adminRec);
+    }
+
+    function completeAdminLogin(adminRec) {
+      completeLogin(adminRec);
+      refreshUsersFromCloud().then(() => {
+        if (!document.getElementById("view-admin").classList.contains("hidden")) renderUsersTable();
+      });
     }
 
     function toggleAdminPwdLookup() {
@@ -1543,42 +1730,38 @@
       if (hideBox && box) box.classList.add("hidden");
     }
 
-    function loginAdminWithPin() {
+    async function loginAdminWithPin() {
       const pinEl = document.getElementById("admin-lookup-pin");
       const errEl = document.getElementById("admin-lookup-error");
       if (!pinEl || !errEl) return;
+      const showErr = msg => { errEl.textContent = msg; errEl.classList.remove("hidden"); };
 
       const pin = pinEl.value.trim();
-      if (!pin) {
-        errEl.textContent = "請輸入管理安全碼。";
-        errEl.classList.remove("hidden");
-        return;
-      }
-      const admins = getUsers().filter(u => u.role === "admin" && u.status !== "disabled");
-      if (!admins.length) {
-        errEl.textContent = "目前找不到啟用中的管理者帳號。";
-        errEl.classList.remove("hidden");
-        return;
-      }
+      if (!pin) return showErr("請輸入管理安全碼。");
+      const pinHash = hashPin(pin);
+      showBusy("正在驗證管理安全碼...");
+      const res = await cloudPost({ action: "login", role: "admin", auth: { pinHash } });
+      hideBusy();
 
-      const typedUname = (document.getElementById("login-username").value || "").trim();
-      const fallbackPin = getAdminPin();
-      const targetAdmin =
-        (typedUname ? admins.find(u => u.username === typedUname && String(u.securityPin || fallbackPin).trim() === pin) : null) ||
-        admins.find(u => String(u.securityPin || fallbackPin).trim() === pin);
-
-      if (!targetAdmin) {
-        errEl.textContent = "❌ 管理安全碼錯誤，無法登入。";
-        errEl.classList.remove("hidden");
-        return;
+      let targetAdmin = null;
+      if (res.ok && res.user) {
+        cloudHasAdmin = true;
+        targetAdmin = upsertLocalUser(Object.assign({}, res.user, { pinHash }));
+      } else if (res.netError) {
+        const admins = getLocalAdmins();
+        if (!admins.length) return showErr("目前找不到啟用中的管理者帳號。");
+        const typedUname = (document.getElementById("login-username").value || "").trim();
+        targetAdmin = (typedUname ? admins.find(u => u.username === typedUname && u.pinHash === pinHash) : null) ||
+          admins.find(u => u.pinHash === pinHash);
+        if (!targetAdmin) return showErr("❌ 管理安全碼錯誤，無法登入。");
+      } else {
+        return showErr("❌ 管理安全碼錯誤，無法登入。");
       }
 
       document.getElementById("login-error").classList.add("hidden");
       resetAdminPwdLookup(true);
-      completeLogin(targetAdmin);
-      setTimeout(() => {
-        alert("🔐 您已使用「管理安全碼」登入，為了系統安全，請至「管理後台」修改管理者密碼。");
-      }, 150);
+      sessionAuth = { username: targetAdmin.username, pinHash };
+      completeAdminLogin(targetAdmin);
     }
 
     function applyRoleTheme(isAdmin) {
@@ -1610,7 +1793,7 @@
       }
     }
 
-    function completeLogin(userObj) {
+    async function completeLogin(userObj) {
       currentUser = userObj;
       activeGroup = userObj.defaultGroup || "國小";
       addLog("登入", activeGroup, userObj.role === "admin" ? "管理者登入" : (userObj.role === "guest" ? "遊客登入" : "使用者登入"));
@@ -1653,7 +1836,13 @@
       } else if (isGuest) {
         showGroupSelect();
       } else {
-        pullFromCloudSilent(userObj.username);
+        // 先等雲端資料下載並合併完成，才開放作答，避免舊資料覆蓋剛作答的進度
+        showBusy("正在從雲端同步您的進度...");
+        await pullFromCloudSilent(userObj.username);
+        hideBusy();
+        if (currentUser !== userObj) return;
+        document.getElementById("nav-wrong-count").textContent = getTotalWrongCount();
+        updatePointsDisplay();
         showGroupSelect();
       }
     }
@@ -1662,6 +1851,8 @@
       stopTimer();
       addLog("登出", activeGroup, "登出系統");
       currentUser = null;
+      sessionAuth = null;
+      pinAuth = null;
       guestSessionProgress = {};
       guestSessionPoints = { total_points: 0 };
       adminPointsUnlocked = false;
@@ -2647,14 +2838,27 @@
       stopTimer();
       showView("view-admin");
       switchAdminTab("users");
+      // 以雲端名單與積分為準，更新後台顯示
+      Promise.all([refreshUsersFromCloud(), refreshAdminOverview()]).then(() => {
+        if (document.getElementById("view-admin").classList.contains("hidden")) return;
+        renderUsersTable();
+        populateAdminStudentSelects();
+      });
     }
 
-    function switchAdminTab(tab) {
+    function getCurrentAdminPinHash() {
+      if (!currentUser || currentUser.role !== "admin") return "";
+      const rec = getUsers().find(u => u.username === currentUser.username);
+      return (rec && rec.pinHash) || currentUser.pinHash || "";
+    }
+
+    async function switchAdminTab(tab) {
       if (tab === "points" && !adminPointsUnlocked) {
-        const pin = prompt("🔒 請輸入積分管理密碼以進入：");
+        const pin = prompt("🔒 請輸入管理安全碼（PIN）以進入積分管理：");
         if (pin === null) return;
-        if (pin.trim() !== (currentUser && currentUser.securityPin ? String(currentUser.securityPin).trim() : getAdminPin())) {
-          alert("❌ 管理密碼錯誤！未授權進入積分管理介面。");
+        const myPinHash = getCurrentAdminPinHash();
+        if (!myPinHash || hashPin(pin) !== myPinHash) {
+          alert("❌ 管理安全碼錯誤！未授權進入積分管理介面。");
           return;
         }
         adminPointsUnlocked = true;
@@ -2682,9 +2886,11 @@
       } else if (tab === "logs") {
         populateAdminStudentSelects();
         renderLogsTable();
+        if (await refreshCloudUsageLogs()) renderLogsTable();
       } else if (tab === "points") {
         populateAdminStudentSelects();
         renderAdminPointsTab();
+        if (await refreshAdminOverview()) renderAdminPointsTab();
       }
     }
 
@@ -2722,16 +2928,16 @@
       }
     }
 
-    function viewStudentPointsQuick(uname) {
-      switchAdminTab("points");
+    async function viewStudentPointsQuick(uname) {
+      await switchAdminTab("points");
       if (!adminPointsUnlocked) return;
       const sel = document.getElementById("admin-points-student");
       if (sel) sel.value = uname;
       renderAdminPointsDetail();
     }
 
-    function viewStudentWrongsQuick(uname, defGrp) {
-      switchAdminTab("wrongs");
+    async function viewStudentWrongsQuick(uname, defGrp) {
+      await switchAdminTab("wrongs");
       document.getElementById("admin-wrong-student").value = uname;
       if (defGrp) document.getElementById("admin-wrong-group").value = defGrp;
       renderAdminStudentWrongs();
@@ -2755,6 +2961,11 @@
         listDiv.innerHTML = '<div class="text-center text-slate-400 py-8">請先於「使用者管理」建立學生帳號。</div>';
         return;
       }
+
+      // 學生可能在其他裝置練習：先從雲端取得該生最新進度
+      listDiv.innerHTML = '<div class="text-center text-slate-500 py-6"><i class="fa-solid fa-spinner fa-spin mr-1.5"></i>正在從雲端讀取該生最新進度...</div>';
+      await mirrorPullStudent(uname);
+      if (document.getElementById("admin-wrong-student").value !== uname) return;
 
       const prog = getStudentProgressByUsername(uname);
       sumDiv.innerHTML = ["國小", "國中", "高中職", "社會"].map(g => {
@@ -2814,6 +3025,7 @@
       const grp = document.getElementById("admin-wrong-group").value;
       if (!uname) return;
       const stu = getUsers().find(u => u.username === uname);
+      await mirrorPullStudent(uname);
       const prog = getStudentProgressByUsername(uname);
       const wrongIds = (prog[grp] && prog[grp].wrong) || [];
       if (wrongIds.length === 0) {
@@ -2920,6 +3132,7 @@
       saveUsers(users);
       renderUsersTable();
       populateUserDropdown();
+      pushUsersToCloudWithWarning({});
     }
 
     function onUserDragEnd(e) {
@@ -2989,67 +3202,90 @@
       document.getElementById("modal-user").classList.add("hidden");
     }
 
-    function saveUserForm(e) {
+    async function saveUserForm(e) {
       e.preventDefault();
       const orig = document.getElementById("edit-user-orig").value;
       const uname = document.getElementById("form-username").value.trim();
       const name = document.getElementById("form-name").value.trim();
-      const pwd = document.getElementById("form-password").value;
+      const pwd = document.getElementById("form-password").value.trim();
       const newPin = (document.getElementById("form-admin-pin")?.value || "").trim();
       const role = document.getElementById("form-role").value;
       const grp = role === "admin" ? "" : document.getElementById("form-group").value;
       const err = document.getElementById("form-user-err");
+      const showErr = msg => { err.textContent = msg; err.classList.remove("hidden"); };
 
       const users = getUsers();
+      // secrets：要寫入雲端「帳號密碼管理」分頁的明碼（只送出有變更的欄位）
+      const secrets = {};
       if (orig) {
         const target = users.find(u => u.username === orig);
         if (!target) return;
+        const backup = JSON.parse(JSON.stringify(target));
         const fixedRole = target.role;
         const fixedGrp = fixedRole === "admin" ? "" : document.getElementById("form-group").value;
-        if (!target.password && !pwd) {
-          err.textContent = "請為此帳號設定登入密碼！";
-          err.classList.remove("hidden");
-          return;
-        }
+        if (pwd && pwd.length < 4) return showErr("密碼至少需要 4 個字元。");
+        if (fixedRole === "admin" && newPin && newPin.length < 4) return showErr("管理安全碼至少需要 4 個字元。");
+        const oldKey = getUserRecordKey(target.username, target.name);
         target.name = name;
-        if (pwd) target.password = pwd;
         target.role = fixedRole;
         target.defaultGroup = fixedGrp;
+        if (pwd) {
+          target.pwHash = hashPw(target.username, pwd);
+          secrets[target.username] = { password: pwd };
+        }
         if (fixedRole === "admin" && newPin) {
-          target.securityPin = newPin;
-          localStorage.setItem(LS_ADMIN_PIN_KEY, newPin);
-          if (currentUser && currentUser.username === target.username) {
-            currentUser.securityPin = newPin;
-          }
+          target.pinHash = hashPin(newPin);
+          secrets[target.username] = Object.assign(secrets[target.username] || {}, { pin: newPin });
         }
         saveUsers(users);
+
+        const res = await pushUsersToCloud(secrets);
+        const isSelf = currentUser && currentUser.username === target.username;
+        if (!res.ok) {
+          // 雲端沒有儲存成功：還原本機，避免與雲端名單不一致
+          const again = getUsers();
+          const i = again.findIndex(u => u.username === orig);
+          if (i !== -1) { again[i] = backup; saveUsers(again); }
+          return showErr(res.netError ? "無法連線雲端，修改未儲存，請確認網路後再試。" : `雲端儲存失敗：${res.error || "管理者驗證失敗"}`);
+        }
+        // 改名：搬移本機的進度、積分與紀錄（雲端由 Apps Script 同步搬移）
+        const newKey = getUserRecordKey(target.username, target.name);
+        if (fixedRole === "user" && oldKey !== newKey) migrateRecordKeys(oldKey, newKey);
+        if (isSelf) {
+          currentUser.name = target.name;
+          if (pwd) sessionAuth = { username: target.username, pwHash: target.pwHash };
+          if (newPin) currentUser.pinHash = target.pinHash;
+          document.getElementById("nav-user-label").textContent = `${currentUser.name} (管理者)`;
+        }
         addLog("帳號管理", fixedRole === "admin" ? "管理者" : fixedGrp, `編輯使用者：${uname}（${fixedRole === "admin" ? "管理者" : "一般使用者"}）`);
       } else {
-        if (!pwd) {
-          err.textContent = "新增帳號時必須設定登入密碼！";
-          err.classList.remove("hidden");
-          return;
-        }
-        if (users.some(u => u.username === uname)) {
-          err.textContent = "此帳號已存在，請使用其他帳號名稱。";
-          err.classList.remove("hidden");
-          return;
-        }
-        const newUser = { username: uname, password: pwd, name, role, defaultGroup: grp, status: "active", createdAt: nowStr() };
-        if (role === "admin" && newPin) {
-          newUser.securityPin = newPin;
-          localStorage.setItem(LS_ADMIN_PIN_KEY, newPin);
+        if (!uname) return showErr("請輸入帳號。");
+        if (!pwd) return showErr("新增帳號時必須設定登入密碼！");
+        if (pwd.length < 4) return showErr("密碼至少需要 4 個字元。");
+        if (users.some(u => u.username === uname)) return showErr("此帳號已存在，請使用其他帳號名稱。");
+        if (role === "admin" && !newPin) return showErr("新增管理者時必須設定管理安全碼（PIN）。");
+        const newUser = { username: uname, name, role, defaultGroup: grp, status: "active", createdAt: nowStr(), pwHash: hashPw(uname, pwd) };
+        secrets[uname] = { password: pwd };
+        if (role === "admin") {
+          newUser.pinHash = hashPin(newPin);
+          secrets[uname].pin = newPin;
         }
         users.push(newUser);
         saveUsers(users);
+        const res = await pushUsersToCloud(secrets);
+        if (!res.ok) {
+          saveUsers(getUsers().filter(u => u.username !== uname));
+          return showErr(res.netError ? "無法連線雲端，帳號未建立，請確認網路後再試。" : `雲端儲存失敗：${res.error || "管理者驗證失敗"}`);
+        }
         addLog("帳號管理", role === "admin" ? "管理者" : grp, `新增使用者：${uname}（${role === "admin" ? "管理者" : "一般使用者"}）`);
       }
 
       closeUserModal();
       renderUsersTable();
+      populateAdminStudentSelects();
     }
 
-    function toggleUserStatus(uname) {
+    async function toggleUserStatus(uname) {
       const users = getUsers();
       const target = users.find(u => u.username === uname);
       if (!target) return;
@@ -3058,10 +3294,20 @@
         alert("無法停用最後一位啟用中的管理者！");
         return;
       }
+      const prevStatus = target.status;
       target.status = target.status === "disabled" ? "active" : "disabled";
       saveUsers(users);
-      addLog("帳號管理", "-", `${target.status === "disabled" ? "停用" : "啟用"}使用者：${uname}`);
       renderUsersTable();
+      const res = await pushUsersToCloud({});
+      if (!res.ok) {
+        const again = getUsers();
+        const t = again.find(u => u.username === uname);
+        if (t) { t.status = prevStatus; saveUsers(again); }
+        renderUsersTable();
+        alert(res.netError ? "無法連線雲端，狀態未變更，請確認網路後再試。" : `雲端儲存失敗：${res.error || "管理者驗證失敗"}`);
+        return;
+      }
+      addLog("帳號管理", "-", `${target.status === "disabled" ? "停用" : "啟用"}使用者：${uname}`);
     }
 
     async function deleteUser(uname) {
@@ -3075,26 +3321,55 @@
       if (!confirm(`確定要永久刪除使用者「${uname}（${target.name}）」及其所有積分、兌獎紀錄與錯題進度嗎？\n\n此操作無法復原！`)) return;
 
       const recordKey = getUserRecordKey(uname, target.name);
+
+      // 先更新雲端名單；失敗就不刪除，避免「本機刪了、雲端還在」而在下次同步時又出現
+      saveUsers(users.filter(u => u.username !== uname));
+      const listRes = await pushUsersToCloud({}, [uname]);
+      if (!listRes.ok) {
+        saveUsers(users);
+        renderUsersTable();
+        alert(listRes.netError ? "無法連線雲端，使用者未刪除，請確認網路後再試。" : `雲端名單更新失敗：${listRes.error || "管理者驗證失敗"}，使用者未刪除。`);
+        return;
+      }
+
       [recordKey, uname].forEach(k => {
         if (!k) return;
         localStorage.removeItem(LS_PROGRESS_PREFIX + k);
         localStorage.removeItem(LS_POINTS_PROFILE_PREFIX + k);
         localStorage.removeItem(LS_POINTS_HISTORY_PREFIX + k);
         localStorage.removeItem(LS_CLOUD_LAST_SYNC_PREFIX + k);
+        localStorage.removeItem(LS_SYNC_META_PREFIX + k);
       });
-
-      saveUsers(users.filter(u => u.username !== uname));
       populateAdminStudentSelects();
       renderUsersTable();
 
       const cloudRes = await deletePlayerFromCloud(recordKey, uname, target.name);
       if (!cloudRes.ok) {
-        alert(`⚠️ 本機使用者已刪除，但雲端試算表同步刪除未完成：\n${cloudRes.message}\n\n提示：請確認已將最新的「Google雲端試算表_AppsScript程式碼.gs」貼回 Apps Script 並「建立新版本」部署，之後可點擊「清理雲端已刪除使用者」一鍵清除殘留資料。`);
+        alert(`⚠️ 使用者已從名單刪除，但雲端試算表的積分／錯題資料未清除：\n${cloudRes.message}\n\n可稍後點擊「清理雲端已刪除使用者」一鍵清除殘留資料。`);
       }
     }
 
+    // 管理後台的使用紀錄：優先使用雲端「使用者使用紀錄」分頁（含所有裝置），無法連線時才用本機紀錄
+    let cloudUsageLogs = null;
+    async function refreshCloudUsageLogs() {
+      if (!currentUser || currentUser.role !== "admin" || !sessionAuth) return false;
+      const res = await cloudPost({ action: "admin_usage", auth: sessionAuth, limit: 3000 });
+      if (!res.ok || !Array.isArray(res.rows)) return false;
+      cloudUsageLogs = res.rows.map(r => {
+        const durationSec = parseInt(String(r[6] || "0"), 10) || 0;
+        return {
+          time: r[0], username: r[1], name: r[2],
+          role: r[1] === "guest" ? "遊客" : "一般使用者",
+          action: "完成測驗",
+          group: String(r[3] || "").replace(/組$/, "") || "-",
+          detail: r[4], score: r[5], durationSec, duration: r[6] || "-"
+        };
+      });
+      return true;
+    }
+
     function getFilteredLogs() {
-      const logs = JSON.parse(localStorage.getItem(LS_LOGS_KEY) || "[]");
+      const logs = cloudUsageLogs || JSON.parse(localStorage.getItem(LS_LOGS_KEY) || "[]");
       const stu = document.getElementById("log-filter-student").value;
       const grp = document.getElementById("log-filter-group").value;
       return logs.filter(l =>
@@ -3116,7 +3391,7 @@
       const timeSummary = mins > 0 ? `${mins} 分 ${secs} 秒` : `${secs} 秒`;
 
       document.getElementById("logs-summary-bar").innerHTML =
-        `測驗次數：<b>${logs.length}</b> 次　｜　累計練習時間：<b>${timeSummary}</b>（僅顯示學生測驗紀錄，最新紀錄在最上方）`;
+        `測驗次數：<b>${logs.length}</b> 次　｜　累計練習時間：<b>${timeSummary}</b>（${cloudUsageLogs ? "資料來源：雲端試算表（所有裝置）" : "資料來源：本機（無法連線雲端）"}，最新紀錄在最上方）`;
 
       const tbody = document.getElementById("admin-logs-tbody");
       if (logs.length === 0) {
@@ -3165,7 +3440,7 @@
     }
 
     function clearAllLogs() {
-      if (!confirm("確定要清空所有使用紀錄嗎？此動作無法復原。")) return;
+      if (!confirm("確定要清空「此裝置」的本機使用紀錄嗎？此動作無法復原。\n\n（雲端試算表「使用者使用紀錄」分頁不會被刪除，如需清除請直接在 Google 試算表中處理。）")) return;
       localStorage.setItem(LS_LOGS_KEY, "[]");
       renderLogsTable();
     }
@@ -3177,7 +3452,7 @@
       return String(s ?? "").replace(/'/g, "\\'").replace(/"/g, "&quot;");
     }
 
-    // ================= 8. 榮譽點數兌獎中心 & 積分管理後台 (密碼 310126) =================
+    // ================= 8. 榮譽點數兌獎中心 & 積分管理後台（需管理安全碼） =================
     function openPointsShopModal() {
       const profile = getPointsProfile();
       const pts = profile.total_points || 0;
@@ -3249,6 +3524,8 @@
 
       const history = getPointsHistory();
       history.unshift({
+        id: newHistoryId(),
+        ts: Date.now(),
         time: new Date().toLocaleString(),
         amount: actualPts,
         type: "獎金",
@@ -3312,6 +3589,8 @@
 
       const history = getPointsHistory();
       history.unshift({
+        id: newHistoryId(),
+        ts: Date.now(),
         time: new Date().toLocaleString(),
         amount,
         type: "獎品",
@@ -3366,11 +3645,28 @@
       }).join("");
     }
 
-    function openPointsAdminModal() {
-      const pin = prompt("🔒 請輸入管理安全確認碼以進入：");
-      if (pin === null) return;
-      if (pin.trim() !== (currentUser && currentUser.securityPin ? String(currentUser.securityPin).trim() : getAdminPin())) {
-        alert("❌ 安全確認碼錯誤！未授權進入管理介面。");
+    // 學生裝置上的「點數與紀錄管理」：需輸入管理安全碼，並交由雲端驗證
+    async function verifyPinForStudentDevice(promptText) {
+      const pin = prompt(promptText);
+      if (pin === null) return false;
+      const pinHash = hashPin(pin);
+      const res = await cloudPost({ action: "login", role: "admin", auth: { pinHash } });
+      if (res.ok) {
+        pinAuth = { pinHash };
+        return true;
+      }
+      if (res.netError || res.no_admin) {
+        const ok = getLocalAdmins().some(u => u.pinHash === pinHash);
+        if (ok) { pinAuth = { pinHash }; return true; }
+      }
+      alert("❌ 安全確認碼錯誤！未授權進入管理介面。");
+      return false;
+    }
+
+    async function openPointsAdminModal() {
+      if (currentUser && currentUser.role === "admin") {
+        pinAuth = sessionAuth;
+      } else if (!(await verifyPinForStudentDevice("🔒 請輸入管理安全確認碼以進入："))) {
         return;
       }
       renderAdminModalUI();
@@ -3379,6 +3675,7 @@
 
     function closePointsAdminModal() {
       document.getElementById("points-admin-modal").classList.add("hidden");
+      pinAuth = null;
       updatePointsDisplay();
       renderPointsHistory();
     }
@@ -3396,69 +3693,84 @@
       if (input) input.value = val;
     }
 
-    function modifyUserPointsCore(uname, action, amt, reason) {
+    // 把雲端回傳的點數／紀錄寫回本機（管理者裝置為鏡像；學生本人裝置則同時更新同步版本）
+    function applyServerPointsResult(uname, res) {
+      const key = getUserRecordKey(uname);
+      const d = res.data || {};
+      const up = d.user_profile || {};
+      const def = { total_points: 0, bonus_50_count: 0, bonus_100_count: 0, bonus_200_count: 0, bonus_500_count: 0, bonus_800_count: 0, bonus_1000_count: 0 };
+      const raw = localStorage.getItem(LS_POINTS_PROFILE_PREFIX + key);
+      const profile = Object.assign(def, raw ? JSON.parse(raw) : {});
+      profile.total_points = Number(up.total_points || 0);
+      ["bonus_50_count", "bonus_100_count", "bonus_200_count", "bonus_500_count", "bonus_800_count", "bonus_1000_count"].forEach(k => {
+        if (up[k] !== undefined) profile[k] = Number(up[k]) || 0;
+      });
+      localStorage.setItem(LS_POINTS_PROFILE_PREFIX + key, JSON.stringify(profile));
+      localStorage.setItem(LS_POINTS_HISTORY_PREFIX + key, JSON.stringify(d.points_history || []));
+      const meta = getSyncMeta(key);
+      meta.rev = Number(res.sync_rev) || 0;
+      meta.base = profile.total_points;
+      setSyncMeta(key, meta);
+    }
+
+    // 管理者點數操作：一律在雲端直接修改該生資料（只動點數與兌獎紀錄，不會覆蓋作答進度）
+    async function adminPointsOp(uname, op, opts = {}) {
+      const auth = (currentUser && currentUser.role === "admin") ? sessionAuth : pinAuth;
+      const cfg = getCloudConfig(uname);
+      if (!cfg.gasUrl) {
+        alert("尚未設定雲端 API 網址，無法修改點數。");
+        return null;
+      }
+      if (!auth) {
+        alert("管理驗證已失效，請重新輸入安全碼或重新登入。");
+        return null;
+      }
+      // 若是學生本人的裝置，先把尚未上傳的進度送出，避免順序錯亂
+      if (isOwnStudentRecord(uname)) await syncChain;
+      const u = getUsers().find(x => x.username === uname);
+      const res = await cloudPost({
+        action: "admin_points",
+        auth,
+        player: getUserRecordKey(uname),
+        username: uname,
+        name: u ? u.name : "",
+        op,
+        amount: opts.amount,
+        reason: opts.reason || "",
+        history_key: opts.historyKey || "",
+        time: new Date().toLocaleString()
+      });
+      if (!res.ok) {
+        if (res.netError) alert("❌ 無法連線雲端試算表，本次修改未執行，請確認網路後再試。");
+        else if (res.auth_failed) alert("❌ 管理者驗證失敗（安全碼或密碼已變更？），請重新登入後再試。");
+        else alert(`❌ 修改失敗：${res.error || "未知錯誤"}`);
+        return null;
+      }
+      applyServerPointsResult(uname, res);
+      if (isOwnStudentRecord(uname)) updatePointsDisplay();
+      return res;
+    }
+
+    async function modifyUserPointsCore(uname, action, amt, reason) {
       if (isNaN(amt) || amt < 0) {
         alert("請輸入有效的點數數值（需為大於或等於 0 的整數）！");
         return false;
       }
-      const profile = getPointsProfile(uname);
-      const oldPts = profile.total_points || 0;
-      let newPts = oldPts;
-
-      if (action === "add") {
-        if (amt <= 0) { alert("增加的點數必須大於 0！"); return false; }
-        newPts = oldPts + amt;
-        const history = getPointsHistory(uname);
-        history.unshift({
-          time: new Date().toLocaleString(),
-          amount: -amt,
-          type: "管理員加點",
-          reason: `➕【管理員加點】${reason || "管理員手動加點"}`,
-          remaining: newPts
-        });
-        savePointsHistory(history, uname);
-        alert(`🎉 成功新增 +${amt} 點！\n點數由 ${oldPts} 點變更為 ${newPts} 點。`);
-      } else if (action === "sub") {
-        if (amt <= 0) { alert("扣除的點數必須大於 0！"); return false; }
-        newPts = Math.max(0, oldPts - amt);
-        const history = getPointsHistory(uname);
-        history.unshift({
-          time: new Date().toLocaleString(),
-          amount: amt,
-          type: "管理員扣點",
-          reason: `➖【管理員扣點】${reason || "管理員手動扣點"}`,
-          remaining: newPts
-        });
-        savePointsHistory(history, uname);
-        alert(`🎉 成功扣除 -${amt} 點！\n點數由 ${oldPts} 點變更為 ${newPts} 點。`);
-      } else if (action === "set") {
-        newPts = amt;
-        const diff = newPts - oldPts;
-        const history = getPointsHistory(uname);
-        history.unshift({
-          time: new Date().toLocaleString(),
-          amount: -diff,
-          type: "管理員修改點數",
-          reason: `✏️【管理員修改】${reason || "直接設定點數"}`,
-          remaining: newPts
-        });
-        savePointsHistory(history, uname);
-        alert(`🎉 成功將點數直接修改為 ${newPts} 點！`);
+      if ((action === "add" || action === "sub") && amt <= 0) {
+        alert(action === "add" ? "增加的點數必須大於 0！" : "扣除的點數必須大於 0！");
+        return false;
       }
-
-      profile.total_points = newPts;
-      savePointsProfile(profile, uname);
-      const diff = newPts - oldPts;
-      syncToCloudSilent(uname, {
-        time: new Date().toLocaleString(),
-        type: "管理員修改點數",
-        reason: reason || (action === "set" ? "直接設定點數" : "管理員調整"),
-        change_str: `${diff >= 0 ? "+" : ""}${diff} 點`
-      });
+      const res = await adminPointsOp(uname, action, { amount: amt, reason });
+      if (!res) return false;
+      const oldPts = res.old_points;
+      const newPts = res.total_points;
+      if (action === "add") alert(`🎉 成功新增 +${amt} 點！\n點數由 ${oldPts} 點變更為 ${newPts} 點。`);
+      else if (action === "sub") alert(`🎉 成功扣除 -${amt} 點！\n點數由 ${oldPts} 點變更為 ${newPts} 點。`);
+      else alert(`🎉 成功將點數直接修改為 ${newPts} 點！`);
       return true;
     }
 
-    function applyAdminPointModification() {
+    async function applyAdminPointModification() {
       const actionEls = document.getElementsByName("admin-pt-action");
       let action = "add";
       for (const el of actionEls) {
@@ -3466,7 +3778,7 @@
       }
       const amt = parseInt(document.getElementById("admin-pt-amount").value, 10);
       const reason = document.getElementById("admin-pt-reason").value.trim();
-      if (!modifyUserPointsCore(currentUser.username, action, amt, reason)) return;
+      if (!(await modifyUserPointsCore(currentUser.username, action, amt, reason))) return;
       renderAdminModalUI();
       updatePointsDisplay();
       renderPointsHistory();
@@ -3478,15 +3790,8 @@
       }
     }
 
-    function renderAdminHistoryList() {
-      const history = getPointsHistory();
-      const listEl = document.getElementById("admin-history-list");
-      if (!listEl) return;
-      if (history.length === 0) {
-        listEl.innerHTML = '<div class="text-center py-4 text-xs text-slate-400">目前尚無兌獎紀錄。</div>';
-        return;
-      }
-      listEl.innerHTML = history.map((item, idx) => {
+    function renderHistoryItemsHtml(history, deleteFnName) {
+      return history.map((item, idx) => {
         const reasonStr = escapeHtml(item.reason || item.item || "兌獎");
         const isDeduct = (item.amount || 0) >= 0;
         const amtStr = isDeduct ? `-${item.amount} 點` : `+${Math.abs(item.amount)} 點`;
@@ -3495,9 +3800,9 @@
           <div class="p-2.5 bg-white rounded-lg border border-slate-200 flex items-center justify-between text-xs shadow-sm">
             <div class="space-y-0.5 flex-1 pr-2">
               <div class="font-bold text-slate-800">${idx + 1}. ${reasonStr}</div>
-              <div class="text-[10px] text-slate-400">⏱️ ${escapeHtml(item.time)} | 變動: <span class="${amtColor} font-bold">${amtStr}</span> (餘: ${item.remaining} 點)</div>
+              <div class="text-[10px] text-slate-400">⏱️ ${escapeHtml(item.time)} | 變動: <span class="${amtColor} font-bold">${amtStr}</span> (餘: ${escapeHtml(item.remaining)} 點)</div>
             </div>
-            <button onclick="deleteSinglePointsHistoryAdmin(${idx})" class="bg-rose-50 hover:bg-rose-100 text-rose-600 border border-rose-200 text-xs px-2.5 py-1 rounded font-bold cursor-pointer transition flex items-center space-x-1">
+            <button onclick="${deleteFnName}(${idx})" class="bg-rose-50 hover:bg-rose-100 text-rose-600 border border-rose-200 text-xs px-2.5 py-1 rounded font-bold cursor-pointer transition flex items-center space-x-1">
               <i class="fa-solid fa-trash-can"></i>
               <span>刪除此筆</span>
             </button>
@@ -3506,69 +3811,78 @@
       }).join("");
     }
 
-    function deleteSinglePointsHistoryAdmin(index) {
+    function renderAdminHistoryList() {
       const history = getPointsHistory();
-      if (index >= 0 && index < history.length) {
-        const item = history[index];
-        const reasonStr = item.reason || item.item || "兌獎";
-        if (confirm(`確定要刪除第 ${index + 1} 筆紀錄嗎？\n\n【${item.time}】${reasonStr}`)) {
-          history.splice(index, 1);
-          savePointsHistory(history);
-          renderAdminHistoryList();
-          renderPointsHistory();
-          syncToCloudSilent(currentUser.username);
-          alert("已成功刪除該筆紀錄！");
-        }
-      }
-    }
-
-    function deleteSinglePointsHistory(index) {
-      const pin = prompt("🔒 請輸入管理安全確認碼以刪除此筆紀錄：");
-      if (pin === null) return;
-      if (pin.trim() !== (currentUser && currentUser.securityPin ? String(currentUser.securityPin).trim() : getAdminPin())) {
-        alert("❌ 安全確認碼錯誤！操作已取消。");
+      const listEl = document.getElementById("admin-history-list");
+      if (!listEl) return;
+      if (history.length === 0) {
+        listEl.innerHTML = '<div class="text-center py-4 text-xs text-slate-400">目前尚無兌獎紀錄。</div>';
         return;
       }
-      deleteSinglePointsHistoryAdmin(index);
+      listEl.innerHTML = renderHistoryItemsHtml(history, "deleteSinglePointsHistoryAdmin");
     }
 
-    function confirmClearAllPointsHistory() {
+    async function deleteSinglePointsHistoryAdmin(index) {
+      const history = getPointsHistory();
+      if (index < 0 || index >= history.length) return;
+      const item = history[index];
+      const reasonStr = item.reason || item.item || "兌獎";
+      if (!confirm(`確定要刪除第 ${index + 1} 筆紀錄嗎？\n\n【${item.time}】${reasonStr}`)) return;
+      const res = await adminPointsOp(currentUser.username, "delete_history", { historyKey: historyKey(item) });
+      if (!res) return;
+      renderAdminHistoryList();
+      renderPointsHistory();
+      alert("已成功刪除該筆紀錄！");
+    }
+
+    async function deleteSinglePointsHistory(index) {
+      if (currentUser && currentUser.role === "admin") {
+        pinAuth = sessionAuth;
+      } else if (!(await verifyPinForStudentDevice("🔒 請輸入管理安全確認碼以刪除此筆紀錄："))) {
+        return;
+      }
+      await deleteSinglePointsHistoryAdmin(index);
+      if (document.getElementById("points-admin-modal").classList.contains("hidden")) pinAuth = null;
+    }
+
+    async function confirmClearAllPointsHistory() {
       const history = getPointsHistory();
       if (history.length === 0) return alert("目前本來就沒有兌獎紀錄！");
-      if (confirm(`確定要清空全部共 ${history.length} 筆兌獎紀錄嗎？\n\n注意：此操作僅清空歷程清單，不會變更選手目前已有的點數。`)) {
-        savePointsHistory([]);
-        renderAdminHistoryList();
-        renderPointsHistory();
-        syncToCloudSilent(currentUser.username);
-        alert("已成功清空所有兌獎紀錄！");
-      }
+      if (!confirm(`確定要清空全部共 ${history.length} 筆兌獎紀錄嗎？\n\n注意：此操作僅清空歷程清單，不會變更選手目前已有的點數。`)) return;
+      const res = await adminPointsOp(currentUser.username, "clear_history");
+      if (!res) return;
+      renderAdminHistoryList();
+      renderPointsHistory();
+      alert("已成功清空所有兌獎紀錄！");
     }
 
-    function confirmResetPointsToZero() {
-      if (confirm("確定要將選手目前累積的【點數歸零】並【重置驟死賽加碼次數】嗎？\n\n此操作無法復原！")) {
-        const profile = getPointsProfile();
-        profile.total_points = 0;
-        profile.bonus_50_count = 0;
-        profile.bonus_100_count = 0;
-        profile.bonus_200_count = 0;
-        profile.bonus_500_count = 0;
-        profile.bonus_800_count = 0;
-        profile.bonus_1000_count = 0;
-        savePointsProfile(profile);
-        renderAdminModalUI();
-        updatePointsDisplay();
-        renderPointsHistory();
-        syncToCloudSilent(currentUser.username, {
-          time: new Date().toLocaleString(),
-          type: "重置點數歸零",
-          reason: "管理員重置點數與加碼次數",
-          change_str: "歸零"
-        });
-        alert("🎉 選手榮譽點數已重置為 0 點，加碼計數已重置！");
-      }
+    async function confirmResetPointsToZero() {
+      if (!confirm("確定要將選手目前累積的【點數歸零】並【重置驟死賽加碼次數】嗎？\n\n此操作無法復原！")) return;
+      const res = await adminPointsOp(currentUser.username, "reset");
+      if (!res) return;
+      renderAdminModalUI();
+      updatePointsDisplay();
+      renderPointsHistory();
+      alert("🎉 選手榮譽點數已重置為 0 點，加碼計數已重置！");
     }
 
     // ---- 管理者後台「積分管理」Tab 功能 ----
+    // 從雲端讀取所有選手的點數摘要，寫入本機作為後台顯示用的鏡像
+    async function refreshAdminOverview() {
+      if (!currentUser || currentUser.role !== "admin" || !sessionAuth) return false;
+      const res = await cloudPost({ action: "admin_overview", auth: sessionAuth });
+      if (!res.ok || !res.players) return false;
+      getUsers().filter(u => u.role === "user").forEach(u => {
+        const key = getUserRecordKey(u.username, u.name);
+        const p = res.players[key];
+        if (!p) return;
+        const raw = localStorage.getItem(LS_POINTS_PROFILE_PREFIX + key);
+        const profile = Object.assign({}, raw ? JSON.parse(raw) : {}, p);
+        localStorage.setItem(LS_POINTS_PROFILE_PREFIX + key, JSON.stringify(profile));
+      });
+      return true;
+    }
+
     function renderAdminPointsTab() {
       const students = getUsers().filter(u => u.role === "user");
       const tbody = document.getElementById("admin-points-overview-tbody");
@@ -3598,7 +3912,21 @@
       renderAdminPointsDetail();
     }
 
-    function renderAdminPointsDetail() {
+    function renderAdminPointsDetailLocal(uname) {
+      const listEl = document.getElementById("admin-tab-history-list");
+      const p = getPointsProfile(uname);
+      const pts = p.total_points || 0;
+      document.getElementById("admin-tab-curr-points").textContent = `${pts} 點`;
+      document.getElementById("admin-tab-curr-cash").textContent = `約可換 NT$ ${Math.floor(pts / 50)} 元`;
+      const history = getPointsHistory(uname);
+      if (history.length === 0) {
+        listEl.innerHTML = '<div class="text-center py-4 text-xs text-slate-400">該生目前尚無兌獎或異動紀錄。</div>';
+        return;
+      }
+      listEl.innerHTML = renderHistoryItemsHtml(history, "adminTabDeleteHistory");
+    }
+
+    async function renderAdminPointsDetail() {
       const sel = document.getElementById("admin-points-student");
       const uname = sel ? sel.value : "";
       const listEl = document.getElementById("admin-tab-history-list");
@@ -3608,37 +3936,12 @@
         if (listEl) listEl.innerHTML = '<div class="text-center py-4 text-xs text-slate-400">請先選擇選手。</div>';
         return;
       }
-      const p = getPointsProfile(uname);
-      const pts = p.total_points || 0;
-      document.getElementById("admin-tab-curr-points").textContent = `${pts} 點`;
-      document.getElementById("admin-tab-curr-cash").textContent = `約可換 NT$ ${Math.floor(pts / 50)} 元`;
-
-      const history = getPointsHistory(uname);
-      if (history.length === 0) {
-        listEl.innerHTML = '<div class="text-center py-4 text-xs text-slate-400">該生目前尚無兌獎或異動紀錄。</div>';
-        return;
-      }
-      listEl.innerHTML = history.map((item, idx) => {
-        const reasonStr = escapeHtml(item.reason || item.item || "兌獎");
-        const isDeduct = (item.amount || 0) >= 0;
-        const amtStr = isDeduct ? `-${item.amount} 點` : `+${Math.abs(item.amount)} 點`;
-        const amtColor = isDeduct ? "text-rose-600" : "text-emerald-600";
-        return `
-          <div class="p-2.5 bg-white rounded-lg border border-slate-200 flex items-center justify-between text-xs shadow-sm">
-            <div class="space-y-0.5 flex-1 pr-2">
-              <div class="font-bold text-slate-800">${idx + 1}. ${reasonStr}</div>
-              <div class="text-[10px] text-slate-400">⏱️ ${escapeHtml(item.time)} | 變動: <span class="${amtColor} font-bold">${amtStr}</span> (餘: ${item.remaining} 點)</div>
-            </div>
-            <button onclick="adminTabDeleteHistory(${idx})" class="bg-rose-50 hover:bg-rose-100 text-rose-600 border border-rose-200 text-xs px-2.5 py-1 rounded font-bold cursor-pointer transition flex items-center space-x-1">
-              <i class="fa-solid fa-trash-can"></i>
-              <span>刪除此筆</span>
-            </button>
-          </div>
-        `;
-      }).join("");
+      renderAdminPointsDetailLocal(uname);
+      // 先顯示本機資料，再以雲端最新資料更新
+      if (await mirrorPullStudent(uname) && sel.value === uname) renderAdminPointsDetailLocal(uname);
     }
 
-    function applyAdminTabPointModification() {
+    async function applyAdminTabPointModification() {
       const uname = document.getElementById("admin-points-student").value;
       if (!uname) return alert("請先選擇一位學生！");
       const actionEls = document.getElementsByName("admin-tab-pt-action");
@@ -3648,68 +3951,51 @@
       }
       const amt = parseInt(document.getElementById("admin-tab-pt-amount").value, 10);
       const reason = document.getElementById("admin-tab-pt-reason").value.trim();
-      if (!modifyUserPointsCore(uname, action, amt, reason)) return;
+      if (!(await modifyUserPointsCore(uname, action, amt, reason))) return;
       renderAdminPointsTab();
     }
 
-    function adminTabDeleteHistory(index) {
+    async function adminTabDeleteHistory(index) {
       const uname = document.getElementById("admin-points-student").value;
       if (!uname) return;
       const history = getPointsHistory(uname);
-      if (index >= 0 && index < history.length) {
-        const item = history[index];
-        const reasonStr = item.reason || item.item || "兌獎";
-        if (confirm(`確定要刪除第 ${index + 1} 筆紀錄嗎？\n\n【${item.time}】${reasonStr}`)) {
-          history.splice(index, 1);
-          savePointsHistory(history, uname);
-          renderAdminPointsDetail();
-          syncToCloudSilent(uname);
-          alert("已成功刪除該筆紀錄！");
-        }
-      }
+      if (index < 0 || index >= history.length) return;
+      const item = history[index];
+      const reasonStr = item.reason || item.item || "兌獎";
+      if (!confirm(`確定要刪除第 ${index + 1} 筆紀錄嗎？\n\n【${item.time}】${reasonStr}`)) return;
+      const res = await adminPointsOp(uname, "delete_history", { historyKey: historyKey(item) });
+      if (!res) return;
+      renderAdminPointsDetailLocal(uname);
+      alert("已成功刪除該筆紀錄！");
     }
 
-    function adminTabClearAllHistory() {
+    async function adminTabClearAllHistory() {
       const uname = document.getElementById("admin-points-student").value;
       if (!uname) return alert("請先選擇一位學生！");
       const history = getPointsHistory(uname);
       if (history.length === 0) return alert("該生目前本來就沒有紀錄！");
-      if (confirm(`確定要清空該生全部共 ${history.length} 筆兌獎與異動紀錄嗎？\n\n注意：此操作僅清空歷程清單，不會變更目前已有的點數。`)) {
-        savePointsHistory([], uname);
-        renderAdminPointsDetail();
-        syncToCloudSilent(uname);
-        alert("已成功清空所有紀錄！");
-      }
+      if (!confirm(`確定要清空該生全部共 ${history.length} 筆兌獎與異動紀錄嗎？\n\n注意：此操作僅清空歷程清單，不會變更目前已有的點數。`)) return;
+      const res = await adminPointsOp(uname, "clear_history");
+      if (!res) return;
+      renderAdminPointsDetailLocal(uname);
+      alert("已成功清空所有紀錄！");
     }
 
-    function adminTabResetPointsToZero() {
+    async function adminTabResetPointsToZero() {
       const uname = document.getElementById("admin-points-student").value;
       if (!uname) return alert("請先選擇一位學生！");
-      if (confirm("確定要將該生目前累積的【點數歸零】並【重置驟死賽加碼次數】嗎？\n\n此操作無法復原！")) {
-        const profile = getPointsProfile(uname);
-        profile.total_points = 0;
-        profile.bonus_50_count = 0;
-        profile.bonus_100_count = 0;
-        profile.bonus_200_count = 0;
-        profile.bonus_500_count = 0;
-        profile.bonus_800_count = 0;
-        profile.bonus_1000_count = 0;
-        savePointsProfile(profile, uname);
-        renderAdminPointsTab();
-        syncToCloudSilent(uname, {
-          time: new Date().toLocaleString(),
-          type: "重置點數歸零",
-          reason: "管理員重置點數與加碼次數",
-          change_str: "歸零"
-        });
-        alert("🎉 該生榮譽點數已重置為 0 點，加碼計數已重置！");
-      }
+      if (!confirm("確定要將該生目前累積的【點數歸零】並【重置驟死賽加碼次數】嗎？\n\n此操作無法復原！")) return;
+      const res = await adminPointsOp(uname, "reset");
+      if (!res) return;
+      renderAdminPointsTab();
+      alert("🎉 該生榮譽點數已重置為 0 點，加碼計數已重置！");
     }
 
     // ================= 9. Google 雲端試算表即時同步 (Google Sheets API) =================
     const DEFAULT_CLOUD_GAS_URL = "https://script.google.com/macros/s/AKfycbyyXgrBowwhnLKwU09FRchmko-JyA-30Ly7rUXQ9zptcyrfkdSmi1BKzjcAEruU49y1/exec";
     const LS_CLOUD_URL_KEY = "ekc_cloud_gas_url_v1";
     const LS_CLOUD_LAST_SYNC_PREFIX = "ekc_cloud_last_sync_v1_";
+    const PROFILE_BONUS_KEYS = ["bonus_50_count", "bonus_100_count", "bonus_200_count", "bonus_500_count", "bonus_800_count", "bonus_1000_count"];
 
     function getCloudConfig(targetUname = null) {
       const uname = targetUname || (currentUser && currentUser.username) || "";
@@ -3720,6 +4006,79 @@
         playerId: recordKey,
         lastSync: recordKey ? (localStorage.getItem(LS_CLOUD_LAST_SYNC_PREFIX + recordKey) || "") : ""
       };
+    }
+
+    // ---- 雲端連線基本工具：網路失敗時回傳 { ok:false, netError:true } ----
+    async function cloudFetchJson(url, options = {}, timeoutMs = 25000) {
+      const ctrl = typeof AbortController !== "undefined" ? new AbortController() : null;
+      const timer = ctrl ? setTimeout(() => ctrl.abort(), timeoutMs) : null;
+      try {
+        const resp = await fetch(url, Object.assign({}, options, ctrl ? { signal: ctrl.signal } : {}));
+        const json = await resp.json();
+        return json && typeof json === "object" ? json : { ok: false, error: "回傳格式錯誤" };
+      } catch (err) {
+        console.warn("Cloud request error:", err);
+        return { ok: false, netError: true, error: String(err) };
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+    }
+    function cloudGet(params, timeoutMs = 15000) {
+      const cfg = getCloudConfig();
+      if (!cfg.gasUrl) return Promise.resolve({ ok: false, netError: true, error: "未設定雲端 API 網址" });
+      const sep = cfg.gasUrl.includes("?") ? "&" : "?";
+      const qs = Object.keys(params).map(k => `${encodeURIComponent(k)}=${encodeURIComponent(params[k])}`).join("&");
+      return cloudFetchJson(`${cfg.gasUrl}${sep}${qs}&_t=${Date.now()}`, { method: "GET" }, timeoutMs);
+    }
+    function cloudPost(body, timeoutMs = 30000) {
+      const cfg = getCloudConfig();
+      if (!cfg.gasUrl) return Promise.resolve({ ok: false, netError: true, error: "未設定雲端 API 網址" });
+      return cloudFetchJson(cfg.gasUrl, {
+        method: "POST",
+        headers: { "Content-Type": "text/plain;charset=utf-8" },
+        body: JSON.stringify(body)
+      }, timeoutMs);
+    }
+
+    // ---- 使用者名單雲端同步 ----
+    async function refreshUsersFromCloud() {
+      const res = await cloudGet({ action: "get_users" });
+      if (!res.ok) return false;
+      cloudHasAdmin = !!res.has_admin;
+      if (!res.has_admin) return true; // 雲端尚未建立名單（舊版升級過渡期），沿用本機名單
+      const local = getUsers();
+      const localMap = new Map(local.map(u => [u.username, u]));
+      const admins = local.filter(u => u.role === "admin");
+      const students = (res.users || []).map(cu => {
+        const lu = localMap.get(cu.username);
+        if (lu && lu.role === "user" && lu.name !== cu.name) {
+          // 管理者在其他裝置改了姓名：一併搬移本機紀錄
+          migrateRecordKeys(getUserRecordKey(lu.username, lu.name), getUserRecordKey(cu.username, cu.name));
+        }
+        const keep = (lu && lu.role === "user" && lu.pwHash) ? { pwHash: lu.pwHash } : {};
+        return Object.assign({}, cu, keep);
+      });
+      saveUsers([...admins, ...students]);
+      return true;
+    }
+
+    // secrets：{ 帳號: { password, pin } }，只放這次有變更的明碼，會寫入雲端「帳號密碼管理」分頁
+    async function pushUsersToCloud(secrets = {}, deleted = []) {
+      const cfg = getCloudConfig();
+      if (!cfg.gasUrl) return { ok: true, localOnly: true };
+      const users = getUsers().map(u => ({
+        username: u.username, name: u.name, role: u.role, defaultGroup: u.defaultGroup || "",
+        status: u.status || "active", createdAt: u.createdAt || ""
+      }));
+      const res = await cloudPost({ action: "save_users", auth: sessionAuth, users, secrets, deleted });
+      if (res.ok) cloudHasAdmin = true;
+      return res;
+    }
+
+    async function pushUsersToCloudWithWarning(secrets = {}) {
+      const res = await pushUsersToCloud(secrets);
+      if (!res.ok) alert(`⚠️ 雲端名單同步失敗：${res.netError ? "無法連線" : (res.error || "管理者驗證失敗")}\n此變更目前只存在這台裝置，請稍後再試一次。`);
+      return res;
     }
 
     function setCloudStatusUI(state, message = "") {
@@ -3771,6 +4130,7 @@
       const prog = progRaw ? JSON.parse(progRaw) : {};
       const ptsProfile = getPointsProfile(uname);
       const ptsHistory = getPointsHistory(uname);
+      const meta = getSyncMeta(recordKey);
 
       let totalAnswered = 0;
       let totalCorrect = 0;
@@ -3788,16 +4148,16 @@
         const bank = window.__EKC_BANK__ && window.__EKC_BANK__[grp];
         const byId = bank ? new Map(bank.map(item => [item.id, item])) : null;
         (gp.wrong || []).forEach(id => {
-          const meta = (gp.wrongMeta && gp.wrongMeta[id]) || {};
+          const meta2 = (gp.wrongMeta && gp.wrongMeta[id]) || {};
           const qItem = byId ? byId.get(id) : null;
           wrongMap[`${grp}_${id}`] = {
             group: grp,
             id,
-            category: meta.c || (qItem ? qItem.c : ""),
-            question: meta.q || (qItem ? qItem.q : ""),
-            answer: meta.a || (qItem ? qItem.a : ""),
-            count: meta.count || 1,
-            lastAt: meta.lastAt || ""
+            category: meta2.c || (qItem ? qItem.c : ""),
+            question: meta2.q || (qItem ? qItem.q : ""),
+            answer: meta2.a || (qItem ? qItem.a : ""),
+            count: meta2.count || 1,
+            lastAt: meta2.lastAt || ""
           };
         });
       });
@@ -3809,12 +4169,14 @@
         player: recordKey,
         data: {
           app: "環境知識競賽題庫系統_新版",
-          version: "3.0",
+          version: "4.0",
           username: uname,
           name: uName,
           export_time: new Date().toLocaleString(),
+          sync_base_rev: meta.rev,
           user_profile: {
             ...ptsProfile,
+            points_base: meta.base,
             total_answered: totalAnswered,
             total_correct: totalCorrect,
             high_streak: suddenBest,
@@ -3830,120 +4192,186 @@
       };
     }
 
-    function applyCloudDataToLocal(uname, cloudData) {
-      if (!uname || !cloudData || typeof cloudData !== "object") return;
+    function progressFromCloudData(cloudData, fallback) {
+      if (cloudData.mix_progress && typeof cloudData.mix_progress === "object") return cloudData.mix_progress;
+      const prog = JSON.parse(JSON.stringify(fallback || {}));
+      Object.values(cloudData.wrong_bank || {}).forEach(w => {
+        if (!w || !w.group || w.id === undefined) return;
+        if (!prog[w.group]) prog[w.group] = { practiced: [], wrong: [], totalAnswered: 0, totalCorrect: 0, suddenBest: 0, wrongMeta: {} };
+        const gp = prog[w.group];
+        if (!gp.wrong.includes(w.id)) gp.wrong.push(w.id);
+        gp.wrongMeta = gp.wrongMeta || {};
+        gp.wrongMeta[w.id] = { count: w.count || 1, lastAt: w.lastAt || "", c: w.category || "", q: w.question || "", a: w.answer || "" };
+      });
+      return prog;
+    }
+
+    function readLocalJson(key, def) {
+      const raw = localStorage.getItem(key);
+      if (!raw) return def;
+      try { return JSON.parse(raw); } catch (e) { return def; }
+    }
+
+    // 管理者裝置：把某位學生的雲端資料「完整複製」到本機，只用於顯示，不會回寫雲端
+    async function mirrorPullStudent(uname) {
+      const key = getUserRecordKey(uname);
+      if (!key) return false;
+      const res = await cloudGet({ action: "load", player: key });
+      if (!res.ok || !res.found || !res.data) return false;
+      const d = res.data;
+      const up = d.user_profile || {};
+      const def = { total_points: 0, bonus_50_count: 0, bonus_100_count: 0, bonus_200_count: 0, bonus_500_count: 0, bonus_800_count: 0, bonus_1000_count: 0 };
+      const profile = Object.assign(def, readLocalJson(LS_POINTS_PROFILE_PREFIX + key, {}));
+      profile.total_points = Number(up.total_points || 0);
+      PROFILE_BONUS_KEYS.forEach(k => { if (up[k] !== undefined) profile[k] = Number(up[k]) || 0; });
+      localStorage.setItem(LS_PROGRESS_PREFIX + key, JSON.stringify(progressFromCloudData(d, {})));
+      localStorage.setItem(LS_POINTS_PROFILE_PREFIX + key, JSON.stringify(profile));
+      localStorage.setItem(LS_POINTS_HISTORY_PREFIX + key, JSON.stringify(Array.isArray(d.points_history) ? d.points_history : []));
+      setSyncMeta(key, { rev: Number(d.sync_rev) || 0, base: profile.total_points, dirty: false, seq: 0 });
+      return true;
+    }
+
+    // 學生本人裝置：下載雲端資料並與本機尚未上傳的變更合併；回傳 true 代表本機有需要再上傳的資料
+    function applyOwnCloudData(uname, cloudData) {
+      if (!uname || !cloudData || typeof cloudData !== "object") return false;
       const uObj = getUsers().find(x => x.username === uname);
       const expectedName = uObj ? String(uObj.name || "").trim() : ((currentUser && currentUser.username === uname) ? String(currentUser.name || "").trim() : "");
-      if (cloudData.name !== undefined && expectedName && String(cloudData.name).trim() !== expectedName) {
+      if (cloudData.name !== undefined && cloudData.name !== "" && expectedName && String(cloudData.name).trim() !== expectedName) {
         console.warn("Cloud data name mismatch, skipped:", cloudData.name, "!=", expectedName);
-        return;
+        return false;
       }
-      const recordKey = getUserRecordKey(uname, expectedName);
-      if (cloudData.mix_progress && typeof cloudData.mix_progress === "object") {
-        localStorage.setItem(LS_PROGRESS_PREFIX + recordKey, JSON.stringify(cloudData.mix_progress));
-      } else if (cloudData.wrong_bank && typeof cloudData.wrong_bank === "object") {
-        const raw = localStorage.getItem(LS_PROGRESS_PREFIX + recordKey);
-        const prog = raw ? JSON.parse(raw) : {};
-        Object.values(cloudData.wrong_bank).forEach(w => {
-          if (!w || !w.group || w.id === undefined) return;
-          if (!prog[w.group]) prog[w.group] = { practiced: [], wrong: [], totalAnswered: 0, totalCorrect: 0, suddenBest: 0, wrongMeta: {} };
-          const gp = prog[w.group];
-          if (!gp.wrong.includes(w.id)) gp.wrong.push(w.id);
-          gp.wrongMeta = gp.wrongMeta || {};
-          gp.wrongMeta[w.id] = { count: w.count || 1, lastAt: w.lastAt || "", c: w.category || "", q: w.question || "", a: w.answer || "" };
-        });
-        localStorage.setItem(LS_PROGRESS_PREFIX + recordKey, JSON.stringify(prog));
-      }
-      if (cloudData.user_profile && typeof cloudData.user_profile === "object") {
-        const p = getPointsProfile(uname);
-        const up = cloudData.user_profile;
-        if (typeof up.total_points === "number" && !isNaN(up.total_points)) p.total_points = up.total_points;
-        ["bonus_50_count", "bonus_100_count", "bonus_200_count", "bonus_500_count", "bonus_800_count", "bonus_1000_count"].forEach(k => {
-          if (typeof up[k] === "number" && !isNaN(up[k])) p[k] = up[k];
-        });
-        savePointsProfile(p, uname);
-      }
-      if (Array.isArray(cloudData.points_history)) {
-        savePointsHistory(cloudData.points_history, uname);
-      }
+      const key = getUserRecordKey(uname, expectedName);
+      const meta = getSyncMeta(key);
+      // 從未以新版同步過（meta.rev 不存在）時也視為有未上傳資料，以「合併」取代「覆蓋」，避免舊版錯誤造成的空白雲端資料蓋掉本機進度
+      const dirty = !!meta.dirty || meta.rev === undefined;
+
+      const localProg = readLocalJson(LS_PROGRESS_PREFIX + key, {});
+      const cloudProg = progressFromCloudData(cloudData, dirty ? {} : localProg);
+      const prog = dirty ? mergeProgressObjects(cloudProg, localProg) : cloudProg;
+
+      const up = cloudData.user_profile || {};
+      const cloudTotal = Number(up.total_points || 0);
+      const def = { total_points: 0, bonus_50_count: 0, bonus_100_count: 0, bonus_200_count: 0, bonus_500_count: 0, bonus_800_count: 0, bonus_1000_count: 0 };
+      const profile = Object.assign(def, readLocalJson(LS_POINTS_PROFILE_PREFIX + key, {}));
+      let total = cloudTotal;
+      if (dirty && meta.base !== undefined) total = Math.max(0, cloudTotal + (Number(profile.total_points || 0) - Number(meta.base)));
+      PROFILE_BONUS_KEYS.forEach(k => {
+        const cv = Number(up[k] || 0);
+        profile[k] = dirty ? Math.max(cv, Number(profile[k] || 0)) : cv;
+      });
+      profile.total_points = total;
+
+      const localHistory = readLocalJson(LS_POINTS_HISTORY_PREFIX + key, []);
+      const cloudHistory = Array.isArray(cloudData.points_history) ? cloudData.points_history : [];
+      const history = dirty ? mergeHistoryLists(cloudHistory, localHistory, cloudData.deleted_history) : cloudHistory;
+
+      localStorage.setItem(LS_PROGRESS_PREFIX + key, JSON.stringify(prog));
+      localStorage.setItem(LS_POINTS_PROFILE_PREFIX + key, JSON.stringify(profile));
+      localStorage.setItem(LS_POINTS_HISTORY_PREFIX + key, JSON.stringify(history));
+      setSyncMeta(key, { rev: Number(cloudData.sync_rev) || 0, base: cloudTotal, dirty, seq: Number(meta.seq) || 0 });
 
       if (currentUser && currentUser.username === uname) {
         updatePointsDisplay();
         const navWrong = document.getElementById("nav-wrong-count");
-        if (navWrong) navWrong.textContent = getTotalWrongCount();
-        if (!document.getElementById("view-home").classList.contains("hidden")) {
-          refreshStatsUI();
-        }
+        if (navWrong && currentUser.role === "user") navWrong.textContent = getTotalWrongCount();
+        if (!document.getElementById("view-home").classList.contains("hidden")) refreshStatsUI();
       }
+      return dirty;
     }
 
     async function pullFromCloudSilent(targetUname = null, showAlertOnSuccess = false) {
       const cfg = getCloudConfig(targetUname);
       if (!cfg.gasUrl || !cfg.playerId) return false;
+      if (!currentUser || cfg.username !== currentUser.username) return false;
+      await syncChain; // 等待尚未完成的上傳，避免下載到舊資料
       setCloudStatusUI("syncing");
-      try {
-        const sep = cfg.gasUrl.includes("?") ? "&" : "?";
-        const url = `${cfg.gasUrl}${sep}action=load&player=${encodeURIComponent(cfg.playerId)}&_t=${Date.now()}`;
-        const resp = await fetch(url, { method: "GET" });
-        const json = await resp.json();
-        if (!json || !json.ok) {
-          throw new Error((json && json.error) || "回傳格式錯誤");
-        }
-        if (json.found && json.data) {
-          applyCloudDataToLocal(cfg.username, json.data);
-          const syncTime = json.updated_at || new Date().toLocaleString();
-          localStorage.setItem(LS_CLOUD_LAST_SYNC_PREFIX + cfg.playerId, syncTime);
-          setCloudStatusUI("connected", `✅ 已從雲端同步最新資料（更新時間：${syncTime}）`);
-          if (showAlertOnSuccess) {
-            const p = getPointsProfile(cfg.username);
-            alert(`🎉 雲端同步成功！\n\n• 選手代碼：${cfg.playerId}\n• 目前榮譽點數：${p.total_points || 0} 點\n• 最後更新：${syncTime}`);
-          }
-          return true;
-        } else {
-          await syncToCloudSilent(cfg.username, null, showAlertOnSuccess);
-          return true;
-        }
-      } catch (err) {
-        console.warn("Cloud pull error:", err);
+      const json = await cloudGet({ action: "load", player: cfg.playerId });
+      if (!json.ok) {
         setCloudStatusUI("error", "⚠️ 雲端讀取失敗，目前使用本機資料");
-        if (showAlertOnSuccess) {
-          alert("❌ 無法連線至 Google 雲端試算表！請確認網路連線或 API 網址與權限。");
-        }
+        if (showAlertOnSuccess) alert("❌ 無法連線至 Google 雲端試算表！請確認網路連線或 API 網址與權限。");
         return false;
       }
-    }
-
-    async function syncToCloudSilent(targetUname = null, logEvent = null, showAlertOnSuccess = false, quizLog = null) {
-      const cfg = getCloudConfig(targetUname);
-      if (!cfg.gasUrl || !cfg.playerId) return false;
-      setCloudStatusUI("syncing");
-      try {
-        const payload = buildCloudPayload(cfg.username, logEvent, quizLog);
-        const resp = await fetch(cfg.gasUrl, {
-          method: "POST",
-          headers: { "Content-Type": "text/plain;charset=utf-8" },
-          body: JSON.stringify(payload)
-        });
-        const json = await resp.json();
-        if (!json || !json.ok) {
-          throw new Error((json && json.error) || "寫入失敗");
-        }
+      if (json.found && json.data) {
+        const needPush = applyOwnCloudData(cfg.username, json.data);
         const syncTime = json.updated_at || new Date().toLocaleString();
         localStorage.setItem(LS_CLOUD_LAST_SYNC_PREFIX + cfg.playerId, syncTime);
-        setCloudStatusUI("connected", `✅ 已即時儲存至 Google 試算表（${syncTime}）`);
+        setCloudStatusUI("connected", `✅ 已從雲端同步最新資料（更新時間：${syncTime}）`);
+        if (needPush) syncToCloudSilent(cfg.username);
         if (showAlertOnSuccess) {
           const p = getPointsProfile(cfg.username);
-          alert(`☁️ 已成功將資料上傳至 Google 雲端試算表！\n\n• 選手代碼：${cfg.playerId}\n• 目前榮譽點數：${p.total_points || 0} 點\n• 同步時間：${syncTime}`);
+          alert(`🎉 雲端同步成功！\n\n• 選手代碼：${cfg.playerId}\n• 目前榮譽點數：${p.total_points || 0} 點\n• 最後更新：${syncTime}`);
         }
         return true;
-      } catch (err) {
-        console.warn("Cloud push error:", err);
-        setCloudStatusUI("error", "⚠️ 雲端儲存失敗，資料已安全保留於本機");
-        if (showAlertOnSuccess) {
-          alert("❌ 上傳至 Google 雲端試算表失敗！請確認網路連線或 API 網址。");
-        }
+      }
+      // 雲端尚無此選手資料：上傳本機資料建立
+      await syncToCloudSilent(cfg.username, null, showAlertOnSuccess);
+      return true;
+    }
+
+    // 上傳排隊：同一時間只送出一筆，依序處理，避免較舊的資料晚到而覆蓋較新的資料
+    let syncChain = Promise.resolve(true);
+
+    function syncToCloudSilent(targetUname = null, logEvent = null, showAlertOnSuccess = false, quizLog = null) {
+      const uname = targetUname || (currentUser && currentUser.username);
+      // 只能上傳「目前登入者本人」的資料；管理者修改學生點數一律走 adminPointsOp
+      if (!currentUser || currentUser.role === "guest" || uname !== currentUser.username) return Promise.resolve(false);
+      const p = syncChain.then(() => pushOwnToCloud(uname, logEvent, showAlertOnSuccess, quizLog));
+      syncChain = p.catch(() => false);
+      return p;
+    }
+
+    async function pushOwnToCloud(uname, logEvent, showAlertOnSuccess, quizLog) {
+      const cfg = getCloudConfig(uname);
+      if (!cfg.gasUrl || !cfg.playerId) return false;
+      if (!currentUser || currentUser.username !== uname) return false;
+      setCloudStatusUI("syncing");
+      const key = cfg.playerId;
+      const seqAtSend = Number(getSyncMeta(key).seq) || 0;
+      const payload = buildCloudPayload(uname, logEvent, quizLog);
+      payload.auth = sessionAuth;
+      const sentTotal = Number(payload.data.user_profile.total_points || 0);
+      const json = await cloudPost(payload);
+      if (!json.ok) {
+        console.warn("Cloud push error:", json.error);
+        setCloudStatusUI("error", json.auth_failed ? "⚠️ 雲端驗證失敗，請登出後重新登入" : "⚠️ 雲端儲存失敗，資料已安全保留於本機");
+        if (showAlertOnSuccess) alert(json.auth_failed ? "❌ 雲端驗證失敗（密碼可能已被管理者修改），請登出後重新登入。" : "❌ 上傳至 Google 雲端試算表失敗！請確認網路連線或 API 網址。");
         return false;
       }
+
+      // 套用雲端回傳的最終結果（可能已與其他裝置／管理者的修改合併）
+      const d = json.data || {};
+      const up = d.user_profile || {};
+      const serverTotal = Number(up.total_points || 0);
+      const def = { total_points: 0, bonus_50_count: 0, bonus_100_count: 0, bonus_200_count: 0, bonus_500_count: 0, bonus_800_count: 0, bonus_1000_count: 0 };
+      const profile = Object.assign(def, readLocalJson(LS_POINTS_PROFILE_PREFIX + key, {}));
+      const flightDelta = Number(profile.total_points || 0) - sentTotal; // 上傳期間本機新增的點數
+      profile.total_points = Math.max(0, serverTotal + flightDelta);
+      if (json.merged) PROFILE_BONUS_KEYS.forEach(k => { if (up[k] !== undefined) profile[k] = Math.max(Number(up[k]) || 0, Number(profile[k]) || 0); });
+      localStorage.setItem(LS_POINTS_PROFILE_PREFIX + key, JSON.stringify(profile));
+      const localHistory = readLocalJson(LS_POINTS_HISTORY_PREFIX + key, []);
+      localStorage.setItem(LS_POINTS_HISTORY_PREFIX + key, JSON.stringify(mergeHistoryLists(d.points_history || [], localHistory, d.deleted_history)));
+      if (json.merged && d.mix_progress) {
+        const localProg = readLocalJson(LS_PROGRESS_PREFIX + key, {});
+        localStorage.setItem(LS_PROGRESS_PREFIX + key, JSON.stringify(mergeProgressObjects(d.mix_progress, localProg)));
+      }
+      const meta = getSyncMeta(key);
+      meta.rev = Number(json.sync_rev) || 0;
+      meta.base = serverTotal;
+      if ((Number(meta.seq) || 0) === seqAtSend) meta.dirty = false;
+      setSyncMeta(key, meta);
+
+      const syncTime = json.updated_at || new Date().toLocaleString();
+      localStorage.setItem(LS_CLOUD_LAST_SYNC_PREFIX + key, syncTime);
+      setCloudStatusUI("connected", `✅ 已即時儲存至 Google 試算表（${syncTime}）`);
+      if (currentUser && currentUser.username === uname) {
+        updatePointsDisplay();
+        if (currentUser.role === "user") document.getElementById("nav-wrong-count").textContent = getTotalWrongCount();
+        if (json.merged && !document.getElementById("view-home").classList.contains("hidden")) refreshStatsUI();
+      }
+      if (showAlertOnSuccess) {
+        alert(`☁️ 已成功將資料上傳至 Google 雲端試算表！\n\n• 選手代碼：${key}\n• 目前榮譽點數：${profile.total_points || 0} 點\n• 同步時間：${syncTime}`);
+      }
+      return true;
     }
 
     function openCloudSyncModal() {
@@ -3968,123 +4396,82 @@
     }
 
     async function syncGuestUsageLogToCloud(quizLog) {
-      const cfg = getCloudConfig("guest");
-      if (!cfg.gasUrl || !quizLog) return false;
-      try {
-        await fetch(cfg.gasUrl, {
-          method: "POST",
-          headers: { "Content-Type": "text/plain;charset=utf-8" },
-          body: JSON.stringify({
-            player: "guest",
-            usage_only: true,
-            quiz_log: quizLog
-          })
-        });
-        return true;
-      } catch (err) {
-        console.warn("Guest usage log sync error:", err);
-        return false;
-      }
+      if (!quizLog) return false;
+      const res = await cloudPost({ player: "guest", usage_only: true, quiz_log: quizLog });
+      return !!res.ok;
     }
 
     async function deletePlayerFromCloud(recordKey, legacyUname = "", userName = "") {
       const cfg = getCloudConfig();
       if (!cfg.gasUrl || !recordKey) return { ok: false, message: "未設定雲端 API 網址" };
-      try {
-        const resp = await fetch(cfg.gasUrl, {
-          method: "POST",
-          headers: { "Content-Type": "text/plain;charset=utf-8" },
-          body: JSON.stringify({
-            delete_player: true,
-            player: recordKey,
-            legacy_player: legacyUname,
-            username: legacyUname,
-            user_name: userName
-          })
-        });
-        const json = await resp.json();
-        if (!json || !json.ok || !json.deleted_player) {
-          return { ok: false, message: "Apps Script 尚未更新為支援刪除的版本（未建立新版本部署）" };
-        }
-        return { ok: true };
-      } catch (err) {
-        console.warn("Delete player from cloud error:", err);
-        return { ok: false, message: String(err) };
+      const json = await cloudPost({
+        delete_player: true,
+        auth: sessionAuth,
+        player: recordKey,
+        legacy_player: legacyUname,
+        username: legacyUname,
+        user_name: userName
+      });
+      if (json.netError) return { ok: false, message: json.error || "無法連線" };
+      if (!json.ok || !json.deleted_player) {
+        return { ok: false, message: json.auth_failed ? "管理者驗證失敗" : (json.error || "Apps Script 尚未更新為最新版本") };
       }
+      return { ok: true };
     }
 
     async function purgeDeletedUsersFromCloud() {
       const cfg = getCloudConfig();
       if (!cfg.gasUrl) return alert("尚未設定雲端 API 網址！");
-      const activePlayers = getUsers()
-        .filter(u => u.role === "user")
-        .map(u => getUserRecordKey(u.username, u.name));
-      if (!confirm(`確定要清理 Google 試算表中「已不在目前使用者名單」的殘留積分、錯題與異動紀錄，並將「使用者使用紀錄」中非現有使用者的紀錄文字標示為紅色嗎？\n\n目前保留名單共 ${activePlayers.length} 位使用者。`)) return;
-      try {
-        const resp = await fetch(cfg.gasUrl, {
-          method: "POST",
-          headers: { "Content-Type": "text/plain;charset=utf-8" },
-          body: JSON.stringify({
-            purge_orphans: true,
-            active_players: activePlayers
-          })
-        });
-        const json = await resp.json();
-        if (json && json.ok && json.purged_orphans) {
-          alert(`🧹 清理與檢查完成！\n\n• 已從積分／錯題／異動分頁移除：${json.removed_count || 0} 位已刪除使用者\n• 「使用者使用紀錄」標紅筆數：${json.marked_usage_red_count || 0} 筆`);
-        } else {
-          alert("⚠️ 雲端尚未更新 Apps Script 版本！\n請將最新的「Google雲端試算表_AppsScript程式碼.gs」貼回 Apps Script 並選擇「建立新版本」重新部署後再試。");
-        }
-      } catch (err) {
+      if (!sessionAuth || cloudHasAdmin === false) {
+        return alert("雲端尚未建立「使用者名單」，請先以管理者身分重新登入完成名單上傳後再使用此功能。");
+      }
+      if (!confirm("確定要清理 Google 試算表中的殘留資料嗎？\n\n系統會以雲端「使用者名單」分頁為準（不是這台裝置的名單），刪除名單以外的積分、錯題與異動紀錄，並將「使用者使用紀錄」中非現有使用者的紀錄文字標示為紅色。")) return;
+      const json = await cloudPost({ purge_orphans: true, auth: sessionAuth });
+      if (json.ok && json.purged_orphans) {
+        alert(`🧹 清理與檢查完成！\n\n• 雲端名單學生數：${json.active_count ?? "-"} 位\n• 已從積分／錯題／異動分頁移除：${json.removed_count || 0} 位已刪除使用者\n• 「使用者使用紀錄」標紅筆數：${json.marked_usage_red_count || 0} 筆`);
+      } else if (json.netError) {
         alert("❌ 連線至 Google 試算表失敗，請確認網路與 API 權限。");
+      } else if (json.auth_failed) {
+        alert("❌ 管理者驗證失敗，請重新登入後再試。");
+      } else {
+        alert(`⚠️ 清理未執行：${json.error || "請確認 Apps Script 已更新為最新版本並重新部署。"}`);
       }
     }
 
     async function syncAnswerFixToCloud(grp, qid, category, question, oldAns, newAns) {
-      const cfg = getCloudConfig();
-      if (!cfg.gasUrl) return false;
-      try {
-        await fetch(cfg.gasUrl, {
-          method: "POST",
-          headers: { "Content-Type": "text/plain;charset=utf-8" },
-          body: JSON.stringify({
-            player: (currentUser && currentUser.username) || "admin",
-            answer_fix: {
-              time: nowStr(),
-              group: grp,
-              id: qid,
-              category: category,
-              question: question,
-              old_answer: oldAns,
-              new_answer: newAns,
-              operator: currentUser ? `${currentUser.name} (${currentUser.username})` : "admin"
-            }
-          })
-        });
-        return true;
-      } catch (err) {
-        console.warn("Sync answer fix error:", err);
-        return false;
+      const res = await cloudPost({
+        auth: sessionAuth,
+        player: (currentUser && currentUser.username) || "admin",
+        answer_fix: {
+          time: nowStr(),
+          group: grp,
+          id: qid,
+          category: category,
+          question: question,
+          old_answer: oldAns,
+          new_answer: newAns,
+          operator: currentUser ? `${currentUser.name} (${currentUser.username})` : "admin"
+        }
+      });
+      if (!res.ok) {
+        const toast = document.getElementById("bank-save-toast");
+        if (toast) {
+          toast.textContent = `⚠️ ${grp}組 #${qid} 已在本機修改，但雲端「答案更正」寫入失敗（${res.netError ? "無法連線" : (res.auth_failed ? "管理者驗證失敗" : res.error)}），其他裝置不會套用此更正。`;
+          toast.classList.remove("hidden");
+        }
       }
+      return !!res.ok;
     }
 
     async function fetchCloudAnswerOverrides() {
-      const cfg = getCloudConfig();
-      if (!cfg.gasUrl) return;
-      try {
-        const sep = cfg.gasUrl.includes("?") ? "&" : "?";
-        const resp = await fetch(`${cfg.gasUrl}${sep}action=get_answer_overrides&_t=${Date.now()}`, { method: "GET" });
-        const json = await resp.json();
-        if (json && json.ok && json.overrides && typeof json.overrides === "object") {
-          const localOv = getAnswerOverrides();
-          Object.keys(json.overrides).forEach(grp => {
-            localOv[grp] = Object.assign({}, localOv[grp] || {}, json.overrides[grp]);
-          });
-          localStorage.setItem(LS_ANS_OVERRIDES_KEY, JSON.stringify(localOv));
-          Object.keys(window.__EKC_BANK__ || {}).forEach(grp => applyAnswerOverrides(grp));
-        }
-      } catch (err) {
-        console.warn("Fetch cloud answer overrides error:", err);
+      const json = await cloudGet({ action: "get_answer_overrides" });
+      if (json && json.ok && json.overrides && typeof json.overrides === "object") {
+        const localOv = getAnswerOverrides();
+        Object.keys(json.overrides).forEach(grp => {
+          localOv[grp] = Object.assign({}, localOv[grp] || {}, json.overrides[grp]);
+        });
+        localStorage.setItem(LS_ANS_OVERRIDES_KEY, JSON.stringify(localOv));
+        Object.keys(window.__EKC_BANK__ || {}).forEach(grp => applyAnswerOverrides(grp));
       }
     }
 
@@ -4092,6 +4479,9 @@
     initDefaultUsers();
     populateUserDropdown();
     const cloudOverridesPromise = fetchCloudAnswerOverrides();
+    refreshUsersFromCloud().then(ok => {
+      if (ok && !currentUser) populateUserDropdown();
+    });
   </script>
 </body>
 </html>
