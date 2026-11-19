@@ -777,7 +777,7 @@
       <form onsubmit="saveUserForm(event)" class="space-y-3">
         <input type="hidden" id="edit-user-orig">
         <div>
-          <label class="block text-xs font-bold text-slate-700 mb-1">帳號（唯一識別碼）</label>
+          <label class="block text-xs font-bold text-slate-700 mb-1">帳號（不可與他人重複；修改後紀錄會自動搬移）</label>
           <input id="form-username" type="text" required placeholder="例如：s01 或 stu_01" class="w-full px-3 py-2 rounded-lg border border-slate-300 text-sm">
         </div>
         <div>
@@ -1151,7 +1151,7 @@
   <script>
     // ================= 1. 按需載入各年段題庫 =================
     window.__EKC_BANK__ = window.__EKC_BANK__ || {};
-    const GROUP_COUNTS = {"國小": 2355, "國中": 2310, "高中職": 2327, "社會": 2373};
+    const GROUP_COUNTS = {"國小": 2564, "國中": 2566, "高中職": 2618, "社會": 2681};
 
     const LS_ANS_OVERRIDES_KEY = "ekc_sys_ans_overrides_v1";
 
@@ -2251,10 +2251,11 @@
             lastAt: nowStr(),
             c: qObj.c || "",
             q: qObj.q || "",
-            a: qObj.a || ""
+            a: qObj.a || "",
+            o: qOptionsFingerprint(qObj)
           };
         }
-        sessionWrongs.push({ qObj, chosen });
+        sessionWrongs.push({ qObj, chosen, grp: qGrp });
         playTone(220, 0.25, "sawtooth");
       }
       prog[qGrp] = gp;
@@ -2317,22 +2318,47 @@
       finishQuiz(false, true);
     }
 
+    // 依「實際出題」的年段組出顯示文字：單一組「國小組」、多組「國小組、國中組」、四組都有「全組別」
+    const GROUP_ORDER = ["國小", "國中", "高中職", "社會"];
+    function orderedGroups(groups) {
+      const set = new Set(groups.filter(Boolean));
+      return GROUP_ORDER.filter(g => set.has(g));
+    }
+    function groupLabelOf(groups) {
+      const list = orderedGroups(groups);
+      if (list.length === 0) return `${activeGroup}組`;
+      if (list.length === GROUP_ORDER.length) return "全組別";
+      return list.map(g => `${g}組`).join("、");
+    }
+    // 使用紀錄的年段欄位：單一組沿用原本格式（如「國小」），多組則存完整文字
+    function logGroupValueOf(groups) {
+      const list = orderedGroups(groups);
+      return list.length === 1 ? list[0] : groupLabelOf(groups);
+    }
+    function groupDisplay(g) {
+      return GROUP_ORDER.includes(g) ? `${g}組` : (g || "-");
+    }
+    function getQuizGroups() {
+      return quizQueue.map((_, i) => (getQuizItemAt(i) || {}).grp);
+    }
+
     function finishQuiz(completed, aborted = false) {
       stopTimer();
       const sec = Math.max(1, Math.round((Date.now() - quizStartTime) / 1000));
       const acc = quizAnswered ? ((quizCorrect / quizAnswered) * 100).toFixed(1) : "0.0";
       const modeName = document.getElementById("quiz-mode-badge").textContent;
       const isGuest = currentUser && currentUser.role === "guest";
+      const quizGroups = getQuizGroups();
       const quizLogPayload = {
         time: nowStr(),
         username: isGuest ? "guest" : (currentUser ? currentUser.username : ""),
         name: isGuest ? "遊客" : (currentUser ? currentUser.name : ""),
-        group: `${activeGroup}組`,
+        group: groupLabelOf(quizGroups),
         mode: `${modeName}${aborted ? "（提前結束）" : ""}`,
         score: isGuest ? `${quizCorrect}/${quizAnswered} (${acc}%)｜${quizScore}分` : `${quizCorrect}/${quizAnswered} (${acc}%)｜${quizScore}分 (+${roundEarnedPoints}點)`,
         duration: `${sec}秒`
       };
-      addLog("完成測驗", activeGroup, quizLogPayload.mode, quizLogPayload.score, sec);
+      addLog("完成測驗", logGroupValueOf(quizGroups), quizLogPayload.mode, quizLogPayload.score, sec);
       if (currentUser && currentUser.role === "user") {
         syncToCloudSilent(currentUser.username, null, false, quizLogPayload);
       } else if (isGuest) {
@@ -2370,6 +2396,9 @@
       }
       const userName = currentUser ? currentUser.name : "練習者";
       const dateStr = nowStr().slice(0, 10);
+      const wrongGroups = sessionWrongs.map(item => item.grp || activeGroup);
+      const groupLabel = groupLabelOf(wrongGroups);
+      const multiGroup = orderedGroups(wrongGroups).length > 1;
       const modeName = document.getElementById("quiz-mode-badge").textContent;
       const letters = ["A", "B", "C", "D"];
 
@@ -2389,7 +2418,7 @@
         return `
           <div style="border:1px solid #cbd5e1; border-radius:8px; padding:12px 14px; margin-bottom:12px; page-break-inside:avoid; background:#fff;">
             <div style="font-size:11px; color:#1d4ed8; margin-bottom:4px;">
-              <b>第 ${idx + 1} 題</b> ｜ ${escapeHtml(q.c)} ${q.s ? "｜ " + escapeHtml(q.s) : ""}
+              <b>第 ${idx + 1} 題</b> ｜ ${multiGroup ? escapeHtml(groupDisplay(item.grp || activeGroup)) + " ｜ " : ""}${escapeHtml(q.c)} ${q.s ? "｜ " + escapeHtml(q.s) : ""}
             </div>
             <div style="font-size:13.5px; font-weight:700; color:#0f172a; margin-bottom:6px; line-height:1.5;">
               ${escapeHtml(q.q)}
@@ -2410,14 +2439,14 @@
           <div style="border-bottom:2px solid #15803d; padding-bottom:8px; margin-bottom:14px;">
             <h2 style="font-size:18px; font-weight:800; color:#14532d; margin:0;">🌿 全國環境知識競賽・錯題複習卷</h2>
             <div style="font-size:12px; color:#475569; margin-top:4px;">
-              姓名：<b>${escapeHtml(userName)}</b> ｜ 年段：<b>${escapeHtml(activeGroup)}組</b> ｜ 模式：${escapeHtml(modeName)} ｜ 錯題數：<b>${sessionWrongs.length} 題</b> ｜ 日期：${dateStr}
+              姓名：<b>${escapeHtml(userName)}</b> ｜ 年段：<b>${escapeHtml(groupLabel)}</b> ｜ 模式：${escapeHtml(modeName)} ｜ 錯題數：<b>${sessionWrongs.length} 題</b> ｜ 日期：${dateStr}
             </div>
           </div>
           ${itemsHtml}
         </div>
       `;
 
-      const filename = `環境知識競賽_${activeGroup}組_錯題複習_${dateStr}.pdf`;
+      const filename = `環境知識競賽_${groupLabel}_錯題複習_${dateStr}.pdf`;
       if (typeof html2pdf !== "undefined") {
         const btn = document.getElementById("btn-download-wrong-pdf");
         const origHtml = btn.innerHTML;
@@ -2487,8 +2516,9 @@
         const bank = window.__EKC_BANK__[g] || [];
         const byId = new Map(bank.map(q => [q.id, q]));
         const wrongIds = (prog[g] && prog[g].wrong) ? prog[g].wrong : [];
+        const wMeta = (prog[g] && prog[g].wrongMeta) || {};
         wrongIds.forEach(qid => {
-          const q = byId.get(qid);
+          const q = resolveRecordedQuestion(byId, qid, wMeta[qid]);
           if (q) cats.add(q.c);
         });
       });
@@ -2509,6 +2539,7 @@
       const kw = (document.getElementById("wrong-search").value || "").trim().toLowerCase();
       const cat = document.getElementById("wrong-cat-filter").value;
       const results = [];
+      results.skipped = 0;
 
       checkedGroups.forEach(g => {
         const gp = prog[g];
@@ -2517,8 +2548,8 @@
         const byId = new Map(bank.map(q => [q.id, q]));
         const meta = gp.wrongMeta || {};
         gp.wrong.forEach(qid => {
-          const q = byId.get(qid);
-          if (!q) return;
+          const q = resolveRecordedQuestion(byId, qid, meta[qid]);
+          if (!q) { if (bank.length) results.skipped++; return; }
           if (cat && q.c !== cat) return;
           if (kw && !q.q.toLowerCase().includes(kw) && !q.e.toLowerCase().includes(kw)) return;
           results.push({ grp: g, q, meta: meta[qid] });
@@ -2542,12 +2573,15 @@
         body.innerHTML = '<div class="text-center text-slate-400 py-10">請至少勾選一個年段以檢視錯題。</div>';
         return;
       }
+      const skippedNote = list.skipped
+        ? `<div class="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-2">⚠️ 有 ${list.skipped} 筆錯題紀錄的題目已從題庫移除或與目前題庫不符，已自動略過。</div>`
+        : "";
       if (list.length === 0) {
-        body.innerHTML = '<div class="text-center text-slate-400 py-10">沒有符合搜尋或篩選條件的錯題。</div>';
+        body.innerHTML = skippedNote + '<div class="text-center text-slate-400 py-10">沒有符合搜尋或篩選條件的錯題。</div>';
         return;
       }
 
-      body.innerHTML = list.map((item, i) => {
+      body.innerHTML = skippedNote + list.map((item, i) => {
         const q = item.q;
         const m = item.meta;
         const cntBadge = m && m.count ? `<span class="bg-rose-100 text-rose-700 px-2 py-0.5 rounded font-bold">錯 ${m.count} 次</span>` : "";
@@ -2608,8 +2642,8 @@
       sessionWrongs = [];
       quizStartTime = Date.now();
 
-      const checkedGroups = getCheckedWrongGroups();
-      const grpLabel = checkedGroups.length === ALL_GROUPS.length ? "全組別" : checkedGroups.join("、");
+      // 標題依「實際有錯題的年段」顯示，而不是勾選了哪些年段
+      const grpLabel = groupLabelOf(list.map(item => item.grp));
       const catFilter = document.getElementById("wrong-cat-filter").value;
       const modeLabel = catFilter ? `錯題本重測（${grpLabel}｜${catFilter}）` : `錯題本重測（${grpLabel}）`;
       addLog("開始測驗", grpLabel, modeLabel, `預計 ${quizQueue.length} 題`);
@@ -2630,7 +2664,7 @@
         alert("目前沒有可匯出的錯題！");
         return;
       }
-      sessionWrongs = list.map(item => ({ qObj: item.q, chosen: null }));
+      sessionWrongs = list.map(item => ({ qObj: item.q, chosen: null, grp: item.grp }));
       downloadSessionWrongsPDF();
     }
 
@@ -3001,9 +3035,9 @@
       const meta = gp.wrongMeta || {};
 
       listDiv.innerHTML = wrongIds.map((qid, i) => {
-        const q = byId.get(qid);
-        if (!q) return "";
         const m = meta[qid];
+        const q = resolveRecordedQuestion(byId, qid, m);
+        if (!q) return "";
         const cntBadge = m && m.count ? `<span class="bg-rose-100 text-rose-700 px-2 py-0.5 rounded font-bold">錯 ${m.count} 次</span>` : "";
         return `
           <div class="border border-slate-200 rounded-xl p-3.5 bg-white space-y-1.5 shadow-sm">
@@ -3035,11 +3069,17 @@
       await loadGroupBank(grp);
       const bank = window.__EKC_BANK__[grp] || [];
       const byId = new Map(bank.map(q => [q.id, q]));
+      const stuMeta = (prog[grp] && prog[grp].wrongMeta) || {};
+      const exportList = wrongIds.map(id => resolveRecordedQuestion(byId, id, stuMeta[id])).filter(Boolean).map(q => ({ qObj: q, chosen: null, grp }));
+      if (exportList.length === 0) {
+        alert("該學生在此年段的錯題紀錄都已不在目前題庫中，沒有可匯出的題目。");
+        return;
+      }
       const prevUser = currentUser;
       const prevGroup = activeGroup;
       currentUser = stu || { username: uname, name: uname };
       activeGroup = grp;
-      sessionWrongs = wrongIds.map(id => byId.get(id)).filter(Boolean).map(q => ({ qObj: q, chosen: null }));
+      sessionWrongs = exportList;
       downloadSessionWrongsPDF();
       currentUser = prevUser;
       activeGroup = prevGroup;
@@ -3172,7 +3212,9 @@
         const u = getUsers().find(x => x.username === editUsername);
         document.getElementById("modal-user-title").textContent = "編輯使用者";
         unameInput.value = u.username;
-        unameInput.disabled = true;
+        // 學生帳號可以修改（系統會自動搬移紀錄）；管理者帳號請在試算表修改
+        unameInput.disabled = u.role === "admin";
+        unameInput.title = u.role === "admin" ? "管理者帳號請直接在試算表「帳號密碼管理」分頁修改" : "修改帳號後，學生需改用新帳號登入；積分與紀錄會自動搬移";
         document.getElementById("form-name").value = u.name;
         document.getElementById("form-password").value = "";
         document.getElementById("pwd-hint").textContent = "（留空則維持原密碼）";
@@ -3218,14 +3260,33 @@
       // secrets：要寫入雲端「帳號密碼管理」分頁的明碼（只送出有變更的欄位）
       const secrets = {};
       if (orig) {
-        const target = users.find(u => u.username === orig);
+        let target = users.find(u => u.username === orig);
         if (!target) return;
-        const backup = JSON.parse(JSON.stringify(target));
         const fixedRole = target.role;
+        const unameChanged = fixedRole === "user" && uname !== orig;
+        if (unameChanged) {
+          if (!uname) return showErr("請輸入帳號。");
+          if (/\s/.test(uname)) return showErr("帳號不可包含空白。");
+          if (users.some(u => u.username === uname)) return showErr("此帳號已被其他使用者使用，請改用其他帳號。");
+          if (!target.uid) {
+            // 需要雲端系統編號才能正確對應改名前後的帳號
+            await refreshUsersFromCloud();
+            users.length = 0;
+            getUsers().forEach(u => users.push(u));
+            target = users.find(u => u.username === orig);
+            if (!target || !target.uid) return showErr("無法取得此帳號的雲端資料，請確認網路後重新整理管理後台再試。");
+          }
+          if (!confirm(`確定要把帳號「${orig}」改為「${uname}」嗎？\n\n積分、錯題與紀錄會自動搬移，學生之後要改用新帳號登入。`)) return;
+        }
+        const backup = JSON.parse(JSON.stringify(target));
         const fixedGrp = fixedRole === "admin" ? "" : document.getElementById("form-group").value;
         if (pwd && pwd.length < 4) return showErr("密碼至少需要 4 個字元。");
         if (fixedRole === "admin" && newPin && newPin.length < 4) return showErr("管理安全碼至少需要 4 個字元。");
         const oldKey = getUserRecordKey(target.username, target.name);
+        if (unameChanged) {
+          target.username = uname;
+          delete target.pwHash; // 本機雜湊與帳號綁定，改帳號後作廢（有輸入新密碼時下面會重算）
+        }
         target.name = name;
         target.role = fixedRole;
         target.defaultGroup = fixedGrp;
@@ -3244,7 +3305,7 @@
         if (!res.ok) {
           // 雲端沒有儲存成功：還原本機，避免與雲端名單不一致
           const again = getUsers();
-          const i = again.findIndex(u => u.username === orig);
+          const i = again.findIndex(u => u.username === target.username);
           if (i !== -1) { again[i] = backup; saveUsers(again); }
           return showErr(res.netError ? "無法連線雲端，修改未儲存，請確認網路後再試。" : `雲端儲存失敗：${res.error || "管理者驗證失敗"}`);
         }
@@ -3361,7 +3422,7 @@
           time: r[0], username: r[1], name: r[2],
           role: r[1] === "guest" ? "遊客" : "一般使用者",
           action: "完成測驗",
-          group: String(r[3] || "").replace(/組$/, "") || "-",
+          group: (/^(國小|國中|高中職|社會)組$/.test(String(r[3] || "")) ? String(r[3]).slice(0, -1) : String(r[3] || "")) || "-",
           detail: r[4], score: r[5], durationSec, duration: r[6] || "-"
         };
       });
@@ -3376,7 +3437,8 @@
         l.role !== "管理者" &&
         l.action === "完成測驗" &&
         (!stu || l.username === stu) &&
-        (!grp || l.group === grp)
+        // 跨組錯題重測（例如「國小組、國中組」「全組別」）在篩選任一相關年段時都要顯示
+        (!grp || l.group === grp || l.group === "全組別" || String(l.group || "").split("、").includes(`${grp}組`))
       );
     }
 
@@ -3402,7 +3464,7 @@
         <tr class="hover:bg-slate-50">
           <td class="px-3 py-2 text-slate-500 whitespace-nowrap">${escapeHtml(l.time)}</td>
           <td class="px-3 py-2 font-bold text-slate-800">${escapeHtml(l.name)} <span class="font-normal text-slate-500">(${escapeHtml(l.username)})</span></td>
-          <td class="px-3 py-2">${escapeHtml(l.group)}組</td>
+          <td class="px-3 py-2">${escapeHtml(groupDisplay(l.group))}</td>
           <td class="px-3 py-2">${escapeHtml(l.detail)}</td>
           <td class="px-3 py-2 font-bold text-emerald-700 whitespace-nowrap">${escapeHtml(l.score)}</td>
           <td class="px-3 py-2 text-slate-600 whitespace-nowrap">${escapeHtml(l.duration)}</td>
@@ -3416,7 +3478,7 @@
       const csvCell = v => `"${String(v ?? "").replace(/"/g, '""')}"`;
       const lines = [headers.map(csvCell).join(",")];
       logs.forEach(l => {
-        lines.push([l.time, l.username, l.name, l.group, l.detail, l.score, l.duration].map(csvCell).join(","));
+        lines.push([l.time, l.username, l.name, groupDisplay(l.group), l.detail, l.score, l.duration].map(csvCell).join(","));
       });
       const blob = new Blob(["\uFEFF" + lines.join("\r\n")], { type: "text/csv;charset=utf-8;" });
       downloadBlob(blob, `環境知識競賽_學生使用紀錄_${new Date().toISOString().slice(0,10)}.csv`);
@@ -3450,6 +3512,48 @@
     }
     function escapeAttr(s) {
       return String(s ?? "").replace(/'/g, "\\'").replace(/"/g, "&quot;");
+    }
+
+    // ================= 題號防呆：確認紀錄中的題號仍對應同一道題 =================
+    // 練習進度與錯題以「組別＋題號」記錄。若日後題庫重新編號，舊題號可能對到別的題目；
+    // 這裡拿答錯當下存下的題目文字（wrongMeta.q 題幹＋wrongMeta.o 選項片段）與目前題庫比對，
+    // 明顯不同就略過該筆紀錄，避免在錯題本、重測或 PDF 中出現錯誤的題目。
+    // 門檻以實際題庫校正：異體字、選項空白、補字等修改不會被誤擋。
+    function normQText(s) {
+      return String(s || "").replace(/\([A-D]\)/g, "").replace(/[\s，。、？?！!：:；;「」『』（）()《》〈〉"'．.・…\/]/g, "").replace(/臺/g, "台");
+    }
+    // 選項前 24 字（題幹已另存於 wrongMeta.q，這裡只補選項以提高辨識度，並控制雲端資料大小）
+    function qOptionsFingerprint(q) {
+      return normQText(((q && q.o) || []).join("")).slice(0, 24);
+    }
+    function qFingerprintText(q) {
+      return normQText(q && q.q) + qOptionsFingerprint(q);
+    }
+    function charOverlap(a, b) {
+      if (a === b) return 1;
+      const count = s => { const m = new Map(); for (const ch of s) m.set(ch, (m.get(ch) || 0) + 1); return m; };
+      const A = count(a), B = count(b);
+      let inter = 0, na = 0, nb = 0;
+      A.forEach((v, k) => { inter += Math.min(v, B.get(k) || 0); na += v; });
+      B.forEach(v => { nb += v; });
+      const m = Math.min(na, nb);
+      return m ? inter / m : 0;
+    }
+    function isRecordedSameQuestion(meta, q) {
+      if (!meta) return true;
+      if (meta.q && meta.o) return charOverlap(normQText(meta.q) + meta.o, qFingerprintText(q)) >= 0.75;
+      if (meta.q) return charOverlap(normQText(meta.q), normQText(q.q)) >= 0.6; // 舊紀錄只有題幹
+      return true;
+    }
+    // 回傳目前題庫中的題目；題號不存在或已對到別題時回傳 null
+    function resolveRecordedQuestion(byId, qid, meta) {
+      const q = byId ? byId.get(qid) : null;
+      if (!q) return null;
+      if (!isRecordedSameQuestion(meta, q)) {
+        console.warn("[題號防呆] 紀錄與目前題庫不符，已略過：", qid, meta && meta.q, "→", q.q);
+        return null;
+      }
+      return q;
     }
 
     // ================= 8. 榮譽點數兌獎中心 & 積分管理後台（需管理安全碼） =================
@@ -4048,14 +4152,17 @@
       if (!res.has_admin) return true; // 雲端尚未建立名單（舊版升級過渡期），沿用本機名單
       const local = getUsers();
       const localMap = new Map(local.map(u => [u.username, u]));
+      const localByUid = new Map(local.filter(u => u.uid).map(u => [u.uid, u]));
       const admins = local.filter(u => u.role === "admin");
       const students = (res.users || []).map(cu => {
-        const lu = localMap.get(cu.username);
-        if (lu && lu.role === "user" && lu.name !== cu.name) {
-          // 管理者在其他裝置改了姓名：一併搬移本機紀錄
+        // 先用系統編號對應（帳號可能被改過），再用帳號對應
+        const lu = (cu.uid && localByUid.get(cu.uid)) || localMap.get(cu.username);
+        if (lu && lu.role === "user" && (lu.name !== cu.name || lu.username !== cu.username)) {
+          // 管理者在試算表或其他裝置改了帳號／姓名：一併搬移本機紀錄
           migrateRecordKeys(getUserRecordKey(lu.username, lu.name), getUserRecordKey(cu.username, cu.name));
         }
-        const keep = (lu && lu.role === "user" && lu.pwHash) ? { pwHash: lu.pwHash } : {};
+        // 本機密碼雜湊與帳號綁定，帳號改了就作廢（之後需連網登入）
+        const keep = (lu && lu.role === "user" && lu.pwHash && lu.username === cu.username) ? { pwHash: lu.pwHash } : {};
         return Object.assign({}, cu, keep);
       });
       saveUsers([...admins, ...students]);
@@ -4067,11 +4174,21 @@
       const cfg = getCloudConfig();
       if (!cfg.gasUrl) return { ok: true, localOnly: true };
       const users = getUsers().map(u => ({
-        username: u.username, name: u.name, role: u.role, defaultGroup: u.defaultGroup || "",
+        uid: u.uid || "", username: u.username, name: u.name, role: u.role, defaultGroup: u.defaultGroup || "",
         status: u.status || "active", createdAt: u.createdAt || ""
       }));
       const res = await cloudPost({ action: "save_users", auth: sessionAuth, users, secrets, deleted });
-      if (res.ok) cloudHasAdmin = true;
+      if (res.ok) {
+        cloudHasAdmin = true;
+        // 記下雲端配發的系統編號，之後改帳號時才能正確對應
+        if (Array.isArray(res.users)) {
+          const uidByName = new Map(res.users.map(u => [u.username, u.uid]));
+          const local = getUsers();
+          let changed = false;
+          local.forEach(u => { const id = uidByName.get(u.username); if (id && u.uid !== id) { u.uid = id; changed = true; } });
+          if (changed) saveUsers(local);
+        }
+      }
       return res;
     }
 
@@ -4149,13 +4266,14 @@
         const byId = bank ? new Map(bank.map(item => [item.id, item])) : null;
         (gp.wrong || []).forEach(id => {
           const meta2 = (gp.wrongMeta && gp.wrongMeta[id]) || {};
-          const qItem = byId ? byId.get(id) : null;
+          // 題號仍對應同一題 → 使用目前題庫內容（含更正後的答案）；否則保留答錯當下的紀錄
+          const qItem = byId ? resolveRecordedQuestion(byId, id, meta2) : null;
           wrongMap[`${grp}_${id}`] = {
             group: grp,
             id,
-            category: meta2.c || (qItem ? qItem.c : ""),
-            question: meta2.q || (qItem ? qItem.q : ""),
-            answer: meta2.a || (qItem ? qItem.a : ""),
+            category: qItem ? qItem.c : (meta2.c || ""),
+            question: qItem ? qItem.q : (meta2.q || ""),
+            answer: qItem ? qItem.a : (meta2.a || ""),
             count: meta2.count || 1,
             lastAt: meta2.lastAt || ""
           };
