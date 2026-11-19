@@ -98,6 +98,10 @@
   </header>
 
   <main class="flex-1 max-w-6xl w-full mx-auto px-3 md:px-5 py-5 md:py-8">
+    <!-- 離線登入時持續顯示的提醒 -->
+    <div id="offline-session-banner" class="hidden mb-4 bg-amber-50 border-2 border-amber-300 text-amber-900 rounded-xl px-4 py-2.5 text-xs md:text-sm font-bold" role="alert">
+      <i class="fa-solid fa-triangle-exclamation mr-1"></i>離線模式：本次的作答紀錄、點數與錯題都不會儲存。要保留紀錄，請連上網路後登出、重新整理網頁再登入。
+    </div>
 
     <!-- 0. 登入畫面 -->
     <div id="view-login" class="max-w-md mx-auto mt-8 md:mt-14 glass-card rounded-2xl shadow-xl border border-emerald-100 p-7 md:p-9">
@@ -105,6 +109,13 @@
         <div class="text-5xl mb-2">🌿</div>
         <h2 class="text-2xl font-extrabold text-emerald-950">環境知識競賽題庫系統</h2>
         <p class="text-xs md:text-sm text-slate-500 mt-1">國小・國中・高中職・社會 分級訓練平台</p>
+      </div>
+
+      <!-- 開啟網頁時連不上雲端的警告 -->
+      <div id="offline-warning" class="hidden mb-5 bg-amber-50 border-2 border-amber-300 text-amber-900 rounded-xl px-4 py-3 space-y-2" role="alert">
+        <div class="font-extrabold text-sm"><i class="fa-solid fa-triangle-exclamation mr-1"></i>目前沒有連上網路</div>
+        <div class="text-xs leading-relaxed">無法連線到雲端。這時登入仍可練習，但這次的<b>作答紀錄、點數與錯題都不會儲存</b>，登出或關閉網頁後就會消失。請連上網路後再按「重新檢查連線」。</div>
+        <button type="button" id="btn-recheck-connection" onclick="checkCloudConnection(true)" class="w-full bg-amber-500 hover:bg-amber-600 text-white text-xs font-bold py-2 rounded-lg transition cursor-pointer">重新檢查連線</button>
       </div>
 
       <!-- 登入身分切換 Tab -->
@@ -1159,13 +1170,25 @@
       return JSON.parse(localStorage.getItem(LS_ANS_OVERRIDES_KEY) || "{}");
     }
 
+    // 答案更正以「年段＋題號」記錄，每筆為 { a: 更正後答案, q: 更正時的題目文字 }（舊資料只有答案字串）。
+    // 套用前用題目文字比對（與錯題紀錄同一套題號防呆）：題庫若被重新編號、題號已對到別題，就不套用，
+    // 避免把別題的正確答案改錯。只有答案字串的舊資料無法比對，維持原本做法直接套用。
     function applyAnswerOverrides(grp) {
       const bank = window.__EKC_BANK__[grp];
       if (!bank) return;
       const ov = getAnswerOverrides()[grp];
       if (!ov) return;
       bank.forEach(q => {
-        if (ov[q.id]) q.a = ov[q.id];
+        const entry = ov[q.id];
+        if (!entry) return;
+        const ans = String(typeof entry === "object" ? entry.a : entry).trim().toUpperCase();
+        const idx = ["A", "B", "C", "D"].indexOf(ans);
+        if (idx < 0 || !q.o || idx >= q.o.length) return; // 答案超出選項範圍：不套用
+        if (typeof entry === "object" && entry.q && !isRecordedSameQuestion({ q: entry.q }, q)) {
+          console.warn(`[題號防呆] ${grp}組 #${q.id} 的答案更正與目前題目不符，已略過：`, entry.q, "→", q.q);
+          return;
+        }
+        q.a = ans;
       });
     }
 
@@ -1276,7 +1299,7 @@
       return !!(currentUser && currentUser.role === "user" && (!uname || uname === currentUser.username));
     }
     function markOwnDirty() {
-      if (!currentUser || currentUser.role !== "user") return;
+      if (!currentUser || currentUser.role !== "user" || offlineSession) return;
       const key = getUserRecordKey(currentUser.username, currentUser.name);
       const meta = getSyncMeta(key);
       meta.dirty = true;
@@ -1343,6 +1366,17 @@
     let sessionAuth = null;   // 本次登入的雲端驗證資訊（僅存在記憶體）
     let pinAuth = null;       // 學生裝置上以安全碼解鎖的管理驗證
     let cloudHasAdmin = null; // 雲端是否已建立管理者（null = 尚未確認）
+
+    // ===== 離線模式：登入時無法連上雲端 → 這次的作答紀錄一律不儲存 =====
+    // 離線時把紀錄存在本機，之後換裝置就看不到，容易造成各裝置資料不一致，
+    // 因此離線登入的學生，本次的進度、點數、點數紀錄只放在記憶體（登出或關閉網頁即清除），
+    // 不寫入本機、也不上傳雲端；畫面上會持續提醒。
+    let offlineSession = false;
+    let offlineSnapshot = null;   // { progress, points, history }
+    let lastCloudNetError = false; // 最近一次雲端請求是否因網路無法連線而失敗
+    function isOfflineStudent(uname) {
+      return !!(offlineSession && offlineSnapshot && currentUser && currentUser.role === "user" && (!uname || uname === currentUser.username));
+    }
     let activeGroup = "國小";
     let soundEnabled = true;
     let randomCount = 10;
@@ -1437,6 +1471,7 @@
       // 僅記錄一般使用者與遊客的系統測驗使用狀況，不記錄管理者與登入登出
       if (!currentUser || (currentUser.role !== "user" && currentUser.role !== "guest")) return;
       if (action !== "完成測驗") return;
+      if (offlineSession && currentUser.role === "user") return; // 離線模式不儲存本次紀錄
       const logs = JSON.parse(localStorage.getItem(LS_LOGS_KEY) || "[]");
       logs.unshift({
         time: nowStr(),
@@ -1457,6 +1492,7 @@
     function getUserProgress() {
       if (!currentUser) return {};
       if (currentUser.role === "guest") return guestSessionProgress;
+      if (isOfflineStudent()) return offlineSnapshot.progress;
       const key = getUserRecordKey(currentUser.username, currentUser.name);
       const raw = localStorage.getItem(LS_PROGRESS_PREFIX + key);
       return raw ? JSON.parse(raw) : {};
@@ -1466,6 +1502,10 @@
       if (!currentUser) return;
       if (currentUser.role === "guest") {
         guestSessionProgress = prog;
+        return;
+      }
+      if (isOfflineStudent()) {
+        offlineSnapshot.progress = prog;
         return;
       }
       const key = getUserRecordKey(currentUser.username, currentUser.name);
@@ -1489,6 +1529,7 @@
 
     function getPointsProfile(uname = null) {
       if (!uname && currentUser && currentUser.role === "guest") return guestSessionPoints;
+      if (isOfflineStudent(uname)) return offlineSnapshot.points;
       const u = uname || (currentUser && currentUser.username);
       if (!u) return { total_points: 0, bonus_50_count: 0, bonus_100_count: 0, bonus_200_count: 0, bonus_500_count: 0, bonus_800_count: 0, bonus_1000_count: 0 };
       const key = getUserRecordKey(u);
@@ -1502,6 +1543,10 @@
         guestSessionPoints = profile;
         return;
       }
+      if (isOfflineStudent(uname)) {
+        offlineSnapshot.points = profile;
+        return;
+      }
       const u = uname || (currentUser && currentUser.username);
       if (!u) return;
       const key = getUserRecordKey(u);
@@ -1511,6 +1556,7 @@
 
     function getPointsHistory(uname = null) {
       if (!uname && currentUser && currentUser.role === "guest") return [];
+      if (isOfflineStudent(uname)) return offlineSnapshot.history;
       const u = uname || (currentUser && currentUser.username);
       if (!u) return [];
       const key = getUserRecordKey(u);
@@ -1520,6 +1566,10 @@
 
     function savePointsHistory(history, uname = null) {
       if (!uname && currentUser && currentUser.role === "guest") return;
+      if (isOfflineStudent(uname)) {
+        offlineSnapshot.history = history;
+        return;
+      }
       const u = uname || (currentUser && currentUser.username);
       if (!u) return;
       const key = getUserRecordKey(u);
@@ -1657,6 +1707,10 @@
       errEl.classList.add("hidden");
       resetAdminPwdLookup(true);
       sessionAuth = { username: uname, pwHash };
+      offlineSession = !!res.netError;
+      if (offlineSession) {
+        alert("⚠️ 目前沒有連上網路（無法連線到雲端）\n\n您仍然可以練習，但這次的作答紀錄、點數與錯題「都不會儲存」，登出或關閉網頁後就會消失。\n\n要保留紀錄，請連上網路後重新整理網頁，再重新登入。");
+      }
       completeLogin(userRec);
     }
 
@@ -1695,6 +1749,8 @@
       errEl.classList.add("hidden");
       resetAdminPwdLookup(true);
       sessionAuth = auth;
+      offlineSession = !!res.netError;
+      if (offlineSession) alert("⚠️ 目前沒有連上網路（無法連線到雲端）\n\n管理後台的學生資料、點數與名單都需要連線才能讀取或修改，請連上網路後重新整理網頁。");
       completeAdminLogin(adminRec);
     }
 
@@ -1794,7 +1850,16 @@
     }
 
     async function completeLogin(userObj) {
+      if (userObj.role === "guest") offlineSession = false;
       currentUser = userObj;
+      offlineSnapshot = null;
+      if (offlineSession && userObj.role === "user") {
+        // 讀出本機現有的進度當作起點（只讀不寫）；本次的變動只存在記憶體
+        const p = getUserProgress(), pts = getPointsProfile(), hist = getPointsHistory();
+        offlineSnapshot = { progress: p, points: pts, history: hist };
+      }
+      const offBanner = document.getElementById("offline-session-banner");
+      if (offBanner) offBanner.classList.toggle("hidden", !(offlineSession && userObj.role !== "guest"));
       activeGroup = userObj.defaultGroup || "國小";
       addLog("登入", activeGroup, userObj.role === "admin" ? "管理者登入" : (userObj.role === "guest" ? "遊客登入" : "使用者登入"));
 
@@ -1836,10 +1901,14 @@
       } else if (isGuest) {
         showGroupSelect();
       } else {
-        // 先等雲端資料下載並合併完成，才開放作答，避免舊資料覆蓋剛作答的進度
-        showBusy("正在從雲端同步您的進度...");
-        await pullFromCloudSilent(userObj.username);
-        hideBusy();
+        // 先等雲端資料下載並合併完成，才開放作答，避免舊資料覆蓋剛作答的進度（離線模式不下載）
+        if (!offlineSession) {
+          showBusy("正在從雲端同步您的進度...");
+          await pullFromCloudSilent(userObj.username);
+          hideBusy();
+        } else {
+          setCloudStatusUI("error", "⚠️ 離線模式：本次紀錄不會儲存");
+        }
         if (currentUser !== userObj) return;
         document.getElementById("nav-wrong-count").textContent = getTotalWrongCount();
         updatePointsDisplay();
@@ -1853,6 +1922,11 @@
       currentUser = null;
       sessionAuth = null;
       pinAuth = null;
+      offlineSession = false;
+      offlineSnapshot = null;
+      const offBanner = document.getElementById("offline-session-banner");
+      if (offBanner) offBanner.classList.add("hidden");
+      checkCloudConnection(false);
       guestSessionProgress = {};
       guestSessionPoints = { total_points: 0 };
       adminPointsUnlocked = false;
@@ -2816,7 +2890,7 @@
 
       const allOv = getAnswerOverrides();
       allOv[grp] = allOv[grp] || {};
-      allOv[grp][qid] = newAns;
+      allOv[grp][qid] = { a: newAns, q: q.q || "" };
       localStorage.setItem(LS_ANS_OVERRIDES_KEY, JSON.stringify(allOv));
 
       renderBankBrowserList(false);
@@ -3558,6 +3632,10 @@
 
     // ================= 8. 榮譽點數兌獎中心 & 積分管理後台（需管理安全碼） =================
     function openPointsShopModal() {
+      if (offlineSession) {
+        alert("⚠️ 離線模式無法兌換獎品或點數（本次紀錄不會儲存）。\n\n請連上網路後重新整理網頁，再重新登入。");
+        return;
+      }
       const profile = getPointsProfile();
       const pts = profile.total_points || 0;
       document.getElementById("shop-points-balance").textContent = pts;
@@ -4147,6 +4225,7 @@
     // ---- 使用者名單雲端同步 ----
     async function refreshUsersFromCloud() {
       const res = await cloudGet({ action: "get_users" });
+      lastCloudNetError = !!res.netError;
       if (!res.ok) return false;
       cloudHasAdmin = !!res.has_admin;
       if (!res.has_admin) return true; // 雲端尚未建立名單（舊版升級過渡期），沿用本機名單
@@ -4330,11 +4409,21 @@
       try { return JSON.parse(raw); } catch (e) { return def; }
     }
 
+    // 讀取雲端進度：帶本次登入的驗證資訊（學生只能讀自己的，管理者可讀任何人）
+    // 若後端還是舊版（回「缺少選手代碼」，且不會寫入任何資料），改用舊的讀取方式
+    async function cloudLoadPlayer(recordKey) {
+      const res = await cloudPost({ action: "load_player", load_player: recordKey, auth: sessionAuth }, 20000);
+      if (!res.ok && !res.netError && res.error === "缺少選手代碼") {
+        return cloudGet({ action: "load", player: recordKey });
+      }
+      return res;
+    }
+
     // 管理者裝置：把某位學生的雲端資料「完整複製」到本機，只用於顯示，不會回寫雲端
     async function mirrorPullStudent(uname) {
       const key = getUserRecordKey(uname);
       if (!key) return false;
-      const res = await cloudGet({ action: "load", player: key });
+      const res = await cloudLoadPlayer(key);
       if (!res.ok || !res.found || !res.data) return false;
       const d = res.data;
       const up = d.user_profile || {};
@@ -4403,9 +4492,9 @@
       if (!currentUser || cfg.username !== currentUser.username) return false;
       await syncChain; // 等待尚未完成的上傳，避免下載到舊資料
       setCloudStatusUI("syncing");
-      const json = await cloudGet({ action: "load", player: cfg.playerId });
+      const json = await cloudLoadPlayer(cfg.playerId);
       if (!json.ok) {
-        setCloudStatusUI("error", "⚠️ 雲端讀取失敗，目前使用本機資料");
+        setCloudStatusUI("error", json.auth_failed ? "⚠️ 雲端驗證失敗，請登出後重新登入；目前使用本機資料" : "⚠️ 雲端讀取失敗，目前使用本機資料");
         if (showAlertOnSuccess) alert("❌ 無法連線至 Google 雲端試算表！請確認網路連線或 API 網址與權限。");
         return false;
       }
@@ -4433,6 +4522,7 @@
       const uname = targetUname || (currentUser && currentUser.username);
       // 只能上傳「目前登入者本人」的資料；管理者修改學生點數一律走 adminPointsOp
       if (!currentUser || currentUser.role === "guest" || uname !== currentUser.username) return Promise.resolve(false);
+      if (offlineSession) return Promise.resolve(false); // 離線模式：本次紀錄不上傳
       const p = syncChain.then(() => pushOwnToCloud(uname, logEvent, showAlertOnSuccess, quizLog));
       syncChain = p.catch(() => false);
       return p;
@@ -4503,13 +4593,19 @@
       document.getElementById("cloud-sync-modal").classList.add("hidden");
     }
 
+    function alertOfflineSession() {
+      alert("⚠️ 目前是離線模式（登入時沒有連上網路），本次紀錄不會儲存，也無法與雲端同步。\n\n請連上網路後登出，重新整理網頁，再重新登入。");
+    }
+
     async function manualPullFromCloud() {
       if (!currentUser) return;
+      if (offlineSession) return alertOfflineSession();
       await pullFromCloudSilent(currentUser.username, true);
     }
 
     async function manualPushToCloud() {
       if (!currentUser) return;
+      if (offlineSession) return alertOfflineSession();
       await syncToCloudSilent(currentUser.username, null, true);
     }
 
@@ -4584,9 +4680,11 @@
     async function fetchCloudAnswerOverrides() {
       const json = await cloudGet({ action: "get_answer_overrides" });
       if (json && json.ok && json.overrides && typeof json.overrides === "object") {
+        // 新版後端另附題目文字（overrides_detail），可做題號防呆；舊版後端只有答案字串
+        const src = (json.overrides_detail && typeof json.overrides_detail === "object") ? json.overrides_detail : json.overrides;
         const localOv = getAnswerOverrides();
-        Object.keys(json.overrides).forEach(grp => {
-          localOv[grp] = Object.assign({}, localOv[grp] || {}, json.overrides[grp]);
+        Object.keys(src).forEach(grp => {
+          localOv[grp] = Object.assign({}, localOv[grp] || {}, src[grp]);
         });
         localStorage.setItem(LS_ANS_OVERRIDES_KEY, JSON.stringify(localOv));
         Object.keys(window.__EKC_BANK__ || {}).forEach(grp => applyAnswerOverrides(grp));
@@ -4594,12 +4692,38 @@
     }
 
     // 啟動初始化
+    // 開啟網頁時檢查能否連上雲端；連不上時在登入畫面顯示警告（離線登入的紀錄不會儲存）
+    let connectionCheckBusy = false;
+    async function checkCloudConnection(manual = false) {
+      if (connectionCheckBusy) return;
+      connectionCheckBusy = true;
+      const box = document.getElementById("offline-warning");
+      const btn = document.getElementById("btn-recheck-connection");
+      if (btn) { btn.disabled = true; btn.textContent = "檢查中..."; }
+      let online = true;
+      if (navigator.onLine === false) {
+        online = false;
+        lastCloudNetError = true;
+      } else {
+        const ok = await refreshUsersFromCloud();
+        online = !lastCloudNetError;
+        if (ok && !currentUser) populateUserDropdown();
+      }
+      if (box) box.classList.toggle("hidden", online);
+      if (btn) { btn.disabled = false; btn.textContent = "重新檢查連線"; }
+      connectionCheckBusy = false;
+      if (manual && online) alert("✅ 已連上雲端，可以正常登入，紀錄會自動儲存。");
+      return online;
+    }
+    window.addEventListener("offline", () => {
+      if (!currentUser) { const box = document.getElementById("offline-warning"); if (box) box.classList.remove("hidden"); }
+    });
+    window.addEventListener("online", () => { if (!currentUser) checkCloudConnection(false); });
+
     initDefaultUsers();
     populateUserDropdown();
     const cloudOverridesPromise = fetchCloudAnswerOverrides();
-    refreshUsersFromCloud().then(ok => {
-      if (ok && !currentUser) populateUserDropdown();
-    });
+    checkCloudConnection(false);
   </script>
 </body>
 </html>
